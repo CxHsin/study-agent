@@ -16,6 +16,18 @@ _Avoid_: Agent framework, chatbot
 The repeated decision cycle in which the model either requests a tool or produces a final response.
 _Avoid_: Workflow, chain
 
+**Agent Core**:
+The focused execution component that runs one model/tool decision cycle and publishes its progress as structured Agent Events.
+_Avoid_: Session Store, Runtime Recovery
+
+**Tool Registry**:
+The collection of Local Tool definitions available to an Agent Core, including each tool's name, description, input contract, and executor.
+_Avoid_: Tool Executor, Tool Catalog
+
+**Agent Event**:
+One structured observation published by an Agent Core while processing a prompt, such as a model response, Tool Call, Tool Result, or final response.
+_Avoid_: Message History, Trace record
+
 **Run State**:
 The current lifecycle state of one submitted task, including whether its model decision, tool work, or completion is pending, active, recoverable, or terminal.
 _Avoid_: Session state, process state
@@ -91,10 +103,6 @@ _Avoid_: Iteration, turn, API call
 **Trace**:
 Structured runtime evidence for one task, recording Agent Steps, model calls, Tool Calls, Tool Results, durations, and the terminal stop reason without recording chain-of-thought or full file contents.
 _Avoid_: Log, transcript
-
-**Agent Event**:
-One structured Trace record emitted while an Agent Harness processes a task.
-_Avoid_: Message, log line
 
 **Tool Event**:
 An Agent Event describing one Local Tool request or its Tool Result, including safe arguments, status, duration, and internal correlation.
