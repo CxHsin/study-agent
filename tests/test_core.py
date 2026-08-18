@@ -121,6 +121,21 @@ def test_repeated_tool_call_is_reported_then_observed() -> None:
     assert result.final_response == "recovered"
 
 
+def test_repeated_tool_call_stops_on_second_observation() -> None:
+    class AlwaysRepeats:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            return ModelResponse(tool_calls=(ToolCall("call", "read", '{"x": 1}'),))
+
+    result = AgentCore(
+        AlwaysRepeats(),
+        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+    ).prompt("go")
+
+    assert result.stop_reason is StopReason.REPEATED_TOOL_CALL
+    assert result.error is not None
+    assert result.error.code == "REPEATED_TOOL_CALL"
+
+
 def test_control_can_abort_before_first_model_call() -> None:
     class NeverCalled:
         def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:

@@ -132,6 +132,7 @@ class AgentCore:
                         "Model repeated a blocked tool call.",
                         "control_error",
                         step,
+                        StopReason.REPEATED_TOOL_CALL,
                     )
                 for tool_call in response.tool_calls:
                     stop = _control_stop(control)
@@ -183,13 +184,21 @@ class AgentCore:
             return RunResult(None, reason, steps, run_id)
         return RunResult(None, reason, steps, run_id)
 
-    def _error(self, run_id: str, code: str, message: str, error_type: str, step: int) -> RunResult:
+    def _error(
+        self,
+        run_id: str,
+        code: str,
+        message: str,
+        error_type: str,
+        step: int,
+        reason: StopReason = StopReason.ERROR,
+    ) -> RunResult:
         error = RunError(code, message, error_type, step)
         try:
-            self._emit("run_failed", {"reason": StopReason.ERROR.value, "error": error})
+            self._emit("run_failed", {"reason": reason.value, "error": error})
         except Exception:  # noqa: BLE001 - listener failures must not replace the run result
-            return RunResult(None, StopReason.ERROR, step, run_id, error)
-        return RunResult(None, StopReason.ERROR, step, run_id, error)
+            return RunResult(None, reason, step, run_id, error)
+        return RunResult(None, reason, step, run_id, error)
 
     def _emit(self, kind: str, data: dict[str, object]) -> None:
         self._sequence += 1
