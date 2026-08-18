@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 from openai import OpenAIError
 
-from minimal_agent.agent import AgentSession, StopReason, ToolCall
 from minimal_agent.deepseek import DeepSeekAdapter
+from minimal_agent.protocol import ModelError, ToolCall
 from minimal_agent.workspace_tools import WorkspaceTools
 
 
@@ -100,7 +100,7 @@ def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
     )
 
 
-def test_model_errors_become_failed_task_results(tmp_path) -> None:
+def test_model_errors_are_exposed_as_model_errors(tmp_path) -> None:
     tools = WorkspaceTools(tmp_path)
     adapter = DeepSeekAdapter(
         api_key="test-key",
@@ -108,7 +108,9 @@ def test_model_errors_become_failed_task_results(tmp_path) -> None:
         client=FakeClient(FakeCompletions(error=OpenAIError("network failed"))),
     )
 
-    result = AgentSession(model=adapter, tools=tools).submit("List files")
-
-    assert result.stop_reason is StopReason.MODEL_ERROR
-    assert result.steps_used == 0
+    try:
+        adapter.complete([{"role": "user", "content": "List files"}])
+    except ModelError as error:
+        assert str(error) == "DeepSeek request failed."
+    else:
+        raise AssertionError("Expected ModelError")

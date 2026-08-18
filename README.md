@@ -25,14 +25,8 @@ Put UTF-8 text files under `workspace/`, then start the console:
 uv run minimal-agent
 ```
 
-The console reuses the most recent persisted Conversation Session after restart. Use `/reset`
-to create a new Session without deleting the old one, `/trace last` to inspect the most recent
-persisted Run, and `/exit` to quit.
-
-Trace events are appended to `.minimal-agent/traces.jsonl`; Message History is stored in
-`.minimal-agent/sessions.sqlite3`. The directory is ignored by Git. Trace records exclude
-chain-of-thought, full messages, and file contents, while Message History currently stores the
-model-facing messages needed to restore a Session.
+The console keeps the current Conversation Session in memory. Use `/reset` to clear it,
+`/trace last` to inspect the current run's Agent Events, and `/exit` to quit.
 
 ## Current Flow
 
@@ -45,7 +39,7 @@ user task
 -> Final Response or terminal guard
 ```
 
-The Adapter uses `deepseek-v4-flash` through the OpenAI-compatible Chat Completions interface and explicitly disables thinking mode.
+The Adapter uses `deepseek-v4-flash` through the OpenAI-compatible Chat Completions interface and explicitly disables thinking mode. The current Core is intentionally synchronous and in-memory; persistence, streaming, and recovery are later learning stages.
 
 ## Verify
 
