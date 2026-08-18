@@ -49,10 +49,10 @@ def run_console(
             result = core.prompt(user_input)
         except KeyboardInterrupt:
             return 0
-        if result.status.value == "completed":
+        if result.stop_reason.value == "final":
             output_fn(f"Agent> {result.final_response or ''}")
         else:
-            output_fn("Agent> Task failed.")
+            output_fn(f"Agent> Task stopped: {result.stop_reason.value}")
 
 
 def create_core() -> AgentCore:

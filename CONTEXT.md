@@ -55,3 +55,15 @@ _Avoid_: Working directory, repository root
 **Provider Adapter**:
 A boundary that translates an external model API into the Internal Message Protocol used by Agent Core.
 _Avoid_: Model implementation, Tool Registry
+
+**RunResult**:
+The explicit outcome of one Agent Core prompt, including its final response, stop reason, steps used, run ID, and an optional structured error.
+_Avoid_: AgentResult, status-only result
+
+**Stop Reason**:
+The canonical reason a single Agent Core run ended: final, max_steps, repeated_tool_call, aborted, cancelled, or error.
+_Avoid_: status, exit code
+
+**Run Control**:
+A cooperative control object that lets the caller abort or cancel a synchronous run at model and tool execution boundaries.
+_Avoid_: thread manager, scheduler
