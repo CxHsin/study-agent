@@ -1,0 +1,1 @@
+The minimal Agent Harness can discover and read this file.
