@@ -3,7 +3,8 @@ from typing import Any, cast
 
 from openai import OpenAI, OpenAIError
 
-from minimal_agent.agent import ChatMessage, ModelError, ModelResponse, ToolCall
+from minimal_agent.protocol import ChatMessage, ModelError, ModelResponse, ToolCall
+from minimal_agent.tools import ToolRegistry
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -13,10 +14,14 @@ class DeepSeekAdapter:
     def __init__(
         self,
         api_key: str,
-        tool_definitions: Sequence[dict[str, object]],
+        tool_definitions: Sequence[dict[str, object]] | ToolRegistry,
         client: Any | None = None,
     ) -> None:
-        self._tool_definitions = tuple(tool_definitions)
+        self._tool_definitions = (
+            tool_definitions.definitions()
+            if isinstance(tool_definitions, ToolRegistry)
+            else tuple(tool_definitions)
+        )
         self._client = client or OpenAI(
             api_key=api_key,
             base_url=DEEPSEEK_BASE_URL,

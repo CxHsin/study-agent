@@ -7,16 +7,16 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import uuid4
 
+from minimal_agent.protocol import (
+    ChatMessage,
+    ModelAdapter,
+    ModelError,
+    ToolCall,
+)
 from minimal_agent.runtime import RunEvent, RunState, RunStateMachine
-
-type ChatMessage = dict[str, object]
 
 MAX_AGENT_STEPS = 8
 TRACE_SCHEMA_VERSION = 1
-
-
-class ModelError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -108,25 +108,8 @@ class TaskResult:
     steps_used: int
 
 
-@dataclass(frozen=True)
-class ModelResponse:
-    content: str | None = None
-    tool_calls: tuple["ToolCall", ...] = ()
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    id: str
-    name: str
-    arguments: str
-
-
 class ToolExecutor(Protocol):
     def execute(self, tool_call: ToolCall) -> str: ...
-
-
-class ModelAdapter(Protocol):
-    def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse: ...
 
 
 class AgentSession:

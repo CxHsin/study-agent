@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from minimal_agent.agent import ToolCall
 from minimal_agent.recovery import ToolRetryPolicy
+from minimal_agent.tools import ToolDefinition, ToolRegistry
 
 MAX_FILE_SIZE_BYTES = 64 * 1024
 
@@ -80,6 +81,22 @@ class WorkspaceTools:
                 },
             },
         )
+
+    def registry(self) -> ToolRegistry:
+        definitions = []
+        for provider_definition in self.definitions():
+            function = provider_definition["function"]
+            if not isinstance(function, dict):
+                raise TypeError("Workspace tool definition has an invalid function payload.")
+            definitions.append(
+                ToolDefinition(
+                    name=str(function["name"]),
+                    description=str(function["description"]),
+                    parameters=function["parameters"],
+                    execute=self.execute,
+                )
+            )
+        return ToolRegistry(definitions)
 
     def retry_policy(self, tool_name: str) -> ToolRetryPolicy:
         if tool_name in {"read_file", "list_files"}:

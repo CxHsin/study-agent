@@ -41,6 +41,9 @@ class ToolRegistry:
     def definitions(self) -> tuple[dict[str, object], ...]:
         return tuple(item.provider_definition() for item in self._definitions.values())
 
+    def get(self, name: str) -> ToolDefinition | None:
+        return self._definitions.get(name)
+
     def execute(self, tool_call: ToolCall) -> str:
         definition = self._definitions.get(tool_call.name)
         if definition is None:

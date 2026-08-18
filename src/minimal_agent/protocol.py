@@ -5,6 +5,10 @@ from typing import Protocol
 type ChatMessage = dict[str, object]
 
 
+class ModelError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ToolCall:
     id: str
