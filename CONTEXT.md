@@ -67,3 +67,15 @@ _Avoid_: status, exit code
 **Run Control**:
 A cooperative control object that lets the caller abort or cancel a synchronous run at model and tool execution boundaries.
 _Avoid_: thread manager, scheduler
+
+**Trace**:
+The ordered, immutable snapshot of Agent Events produced by one Agent Core run.
+_Avoid_: Message History, log file
+
+**Agent Event**:
+A timestamped, sequenced observation with a run ID describing one lifecycle transition or execution result within a Trace.
+_Avoid_: Conversation message, debug print
+
+**Event Listener**:
+An external callback that receives Agent Events during a run for real-time observation without owning the Trace.
+_Avoid_: Event Store, Trace

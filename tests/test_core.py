@@ -2,6 +2,7 @@ import json
 from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore, RunControl, StopReason
+from minimal_agent.events import EventKind
 from minimal_agent.protocol import ChatMessage, ModelResponse, ToolCall
 from minimal_agent.tools import ToolDefinition, ToolRegistry
 from minimal_agent.workspace_tools import WorkspaceTools
@@ -161,3 +162,58 @@ def test_model_error_becomes_structured_run_error() -> None:
     assert result.stop_reason is StopReason.ERROR
     assert result.error is not None
     assert result.error.code == "MODEL_ERROR"
+
+
+def test_run_result_contains_complete_trace_snapshot() -> None:
+    result = AgentCore(
+        ReadThenAnswer(),
+        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+    ).prompt("read it")
+
+    assert result.events[0].kind is EventKind.RUN_STARTED
+    assert result.events[-1].kind is EventKind.FINAL_RESPONSE
+    assert [event.sequence for event in result.events] == list(range(1, len(result.events) + 1))
+    assert {event.run_id for event in result.events} == {result.run_id}
+    assert all(event.elapsed_ms >= 0 for event in result.events)
+    assert all(event.occurred_at.tzinfo is not None for event in result.events)
+    try:
+        result.events[0].data["changed"] = True
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("Trace event data must be immutable")
+
+
+def test_listener_failure_is_isolated_and_recorded() -> None:
+    observed: list[EventKind] = []
+
+    def broken_listener(event) -> None:
+        raise RuntimeError("display failed")
+
+    def healthy_listener(event) -> None:
+        observed.append(event.kind)
+
+    core = AgentCore(
+        ReadThenAnswer(),
+        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+    )
+    core.subscribe(broken_listener)
+    core.subscribe(healthy_listener)
+    result = core.prompt("read it")
+
+    assert result.stop_reason is StopReason.FINAL
+    assert EventKind.LISTENER_ERROR in [event.kind for event in result.events]
+    assert EventKind.FINAL_RESPONSE in observed
+
+
+def test_tool_result_trace_includes_result_and_success() -> None:
+    result = AgentCore(
+        ReadThenAnswer(),
+        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+    ).prompt("read it")
+
+    tool_event = next(
+        event for event in result.events if event.kind is EventKind.TOOL_RESULT_PRODUCED
+    )
+    assert tool_event.data["success"] is True
+    assert tool_event.data["result"] == '{"ok":true}'
