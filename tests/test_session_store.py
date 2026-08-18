@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from minimal_agent.agent import ToolCall
+from minimal_agent.agent import ToolCall, ToolExecutionStatus
 from minimal_agent.session_store import SQLiteSessionStore
 
 
@@ -114,3 +114,32 @@ def test_recovered_history_can_expose_an_unfinished_tool_call(tmp_path: Path) ->
     assert recovered[-1]["role"] == "assistant"
     assert "tool_calls" in recovered[-1]
     assert not any(message.get("role") == "tool" for message in recovered)
+
+
+def test_tool_execution_ledger_survives_reopening_the_store(tmp_path: Path) -> None:
+    database = tmp_path / "sessions.sqlite3"
+    store = SQLiteSessionStore(database)
+    session_id = store.create_session()
+    tool_call = ToolCall("call-1", "record", '{"intent_id":"payment-1"}')
+
+    store.record_tool_execution(
+        session_id,
+        tool_call,
+        run_id="run-1",
+        status=ToolExecutionStatus.PENDING,
+    )
+    store.update_tool_execution(
+        tool_call.id,
+        status=ToolExecutionStatus.STARTED,
+    )
+
+    reopened = SQLiteSessionStore(database)
+
+    assert reopened.get_tool_execution(tool_call.id) == {
+        "call_id": "call-1",
+        "session_id": session_id,
+        "run_id": "run-1",
+        "tool_name": "record",
+        "arguments": '{"intent_id":"payment-1"}',
+        "status": "started",
+    }

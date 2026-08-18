@@ -15,6 +15,7 @@ from minimal_agent.agent import (
     ToolCall,
     TraceEvent,
 )
+from minimal_agent.experimental_tools import IdempotentIntentRecorder
 from minimal_agent.session_store import SQLiteSessionStore
 from minimal_agent.workspace_tools import WorkspaceTools
 
@@ -222,6 +223,38 @@ def test_task_uses_read_file_result_before_completing(tmp_path: Path) -> None:
         final_response="The file says the answer is 42.",
         steps_used=2,
     )
+    assert session.run_state.value == "completed"
+
+
+def test_task_records_tool_execution_status(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("The answer is 42.", encoding="utf-8")
+    store = SQLiteSessionStore(tmp_path / "sessions.sqlite3")
+    session = AgentSession(
+        model=ReadFileThenAnswerModel(),
+        tools=WorkspaceTools(tmp_path),
+        message_store=store,
+        execution_store=store,
+    )
+
+    session.submit("Read notes.txt and report the answer.")
+
+    execution = store.get_tool_execution("call-1")
+    assert execution is not None
+    assert execution["status"] == "succeeded"
+    assert json.loads(execution["result"])["ok"] is True
+
+
+def test_experimental_intent_recorder_is_idempotent() -> None:
+    recorder = IdempotentIntentRecorder()
+    call = ToolCall("call-1", "record_intent", '{"intent_id":"payment-1","value":"send"}')
+
+    first = json.loads(recorder.execute(call))
+    second = json.loads(recorder.execute(ToolCall("call-2", call.name, call.arguments)))
+
+    assert first["data"]["created"] is True
+    assert second["data"]["created"] is False
+    assert recorder.records == {"payment-1": "send"}
+    assert recorder.execution_count == 2
 
 
 def test_trace_records_file_task_in_execution_order(tmp_path: Path) -> None:
@@ -253,6 +286,8 @@ def test_trace_records_file_task_in_execution_order(tmp_path: Path) -> None:
     tool_result = events[3]
     assert tool_result.data["status"] == "ok"
     assert tool_result.data["tool_call_id"] == "call-1"
+    assert events[0].data["run_state"] == "running"
+    assert events[4].data["run_state"] == "running"
     assert events[-1].data == {
         "status": "completed",
         "stop_reason": "final_response",
@@ -458,6 +493,29 @@ def test_tool_exception_emits_terminal_trace_event() -> None:
     ]
     assert events[3].data["status"] == "exception"
     assert events[-1].data["stop_reason"] == "tool_error"
+    assert session.run_state.value == "failed"
+
+
+def test_tool_exception_leaves_execution_status_unknown(tmp_path: Path) -> None:
+    store = SQLiteSessionStore(tmp_path / "sessions.sqlite3")
+
+    class ToolRequestModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            return ModelResponse(tool_calls=(ToolCall("call-error", "x", "{}"),))
+
+    session = AgentSession(
+        model=ToolRequestModel(),
+        tools=RaisingTool(),
+        message_store=store,
+        execution_store=store,
+    )
+
+    result = session.submit("run the tool")
+
+    assert result.stop_reason is StopReason.TOOL_ERROR
+    execution = store.get_tool_execution("call-error")
+    assert execution is not None
+    assert execution["status"] == "unknown"
 
 
 def test_interrupting_tool_emits_cancelled_trace_event() -> None:

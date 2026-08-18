@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import cast
 from uuid import uuid4
 
-from minimal_agent.agent import ChatMessage, ToolCall
+from minimal_agent.agent import ChatMessage, ToolCall, ToolExecutionStatus
 
 
 class SessionNotFoundError(KeyError):
@@ -32,6 +32,18 @@ class SQLiteSessionStore:
                     payload TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (session_id, sequence),
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                );
+                CREATE TABLE IF NOT EXISTS tool_executions (
+                    call_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    arguments TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
                     FOREIGN KEY (session_id) REFERENCES sessions(session_id)
                 );
                 """
@@ -94,6 +106,65 @@ class SQLiteSessionStore:
                 (session_id,),
             ).fetchall()
         return [cast(ChatMessage, json.loads(row[0])) for row in rows]
+
+    def record_tool_execution(
+        self,
+        session_id: str,
+        tool_call: ToolCall,
+        *,
+        run_id: str,
+        status: ToolExecutionStatus,
+    ) -> None:
+        now = _timestamp()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO tool_executions
+                (call_id, session_id, run_id, tool_name, arguments, status, result, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    tool_call.id,
+                    session_id,
+                    run_id,
+                    tool_call.name,
+                    tool_call.arguments,
+                    status.value,
+                    now,
+                    now,
+                ),
+            )
+
+    def update_tool_execution(
+        self,
+        call_id: str,
+        *,
+        status: ToolExecutionStatus,
+        result: str | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE tool_executions
+                SET status = ?, result = COALESCE(?, result), updated_at = ?
+                WHERE call_id = ?
+                """,
+                (status.value, result, _timestamp(), call_id),
+            )
+
+    def get_tool_execution(self, call_id: str) -> dict[str, str] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT call_id, session_id, run_id, tool_name, arguments, status, result
+                FROM tool_executions WHERE call_id = ?
+                """,
+                (call_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        keys = ("call_id", "session_id", "run_id", "tool_name", "arguments", "status", "result")
+        return {key: value for key, value in zip(keys, row, strict=True) if value is not None}
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._path)

@@ -80,6 +80,7 @@ def create_session(trace_sink: TraceSink | None = None) -> AgentSession:
         tools=tools,
         trace_sink=trace_sink,
         message_store=session_store,
+        execution_store=session_store,
         session_id=session_id,
     )
 

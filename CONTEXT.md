@@ -4,6 +4,10 @@ This context describes the smallest agent runtime used to learn how model decisi
 
 ## Language
 
+**Agent Runtime**:
+The complete execution environment that governs agent state, model interaction, tool use, context, permissions, observability, and run control. It contains the Agent Harness and the Agent Loop rather than naming either one alone.
+_Avoid_: Agent framework, Agent Harness, Agent Loop
+
 **Agent Harness**:
 The runtime boundary that coordinates model decisions, tool execution, and completion for one agent interaction.
 _Avoid_: Agent framework, chatbot
@@ -11,6 +15,38 @@ _Avoid_: Agent framework, chatbot
 **Agent Loop**:
 The repeated decision cycle in which the model either requests a tool or produces a final response.
 _Avoid_: Workflow, chain
+
+**Run State**:
+The current lifecycle state of one submitted task, including whether its model decision, tool work, or completion is pending, active, recoverable, or terminal.
+_Avoid_: Session state, process state
+
+**Internal Message Protocol**:
+The provider-independent message vocabulary and ordering rules used by the Agent Runtime to represent model decisions, Tool Calls, Tool Results, and Final Responses.
+_Avoid_: Provider message format, API payload
+
+**Tool Execution Status**:
+The recorded outcome of a Tool Call execution, including whether it is pending, completed, failed, or requires resolution before it may be retried.
+_Avoid_: Tool result, function status
+
+**Recoverable Run**:
+A Run that stopped before terminal completion but retains enough validated state to continue without guessing what work already happened.
+_Avoid_: Retryable task, resumable session
+
+**Idempotent Tool**:
+A Local Tool whose repeated execution with the same call identity and arguments has no additional externally visible effect.
+_Avoid_: Safe tool, read-only tool
+
+**Retry Policy**:
+The explicit rule that determines whether a failed or interrupted Tool Call may be attempted again and under what conditions.
+_Avoid_: Error handling, fallback
+
+**Call Identity**:
+The stable identity of one requested Tool Call across persistence, execution, recovery, and Trace inspection.
+_Avoid_: Request ID, parameter fingerprint
+
+**State Transition Table**:
+The explicit mapping from a Run State and an observed event to the next Run State and its permitted actions.
+_Avoid_: Control-flow diagram, workflow definition
 
 **Local Tool**:
 A capability executed on the user's machine and exposed to the model through a defined input and output contract.

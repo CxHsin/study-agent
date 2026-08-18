@@ -7,6 +7,8 @@ from enum import StrEnum
 from typing import Protocol
 from uuid import uuid4
 
+from minimal_agent.runtime import RunEvent, RunState, RunStateMachine
+
 type ChatMessage = dict[str, object]
 
 MAX_AGENT_STEPS = 8
@@ -54,6 +56,33 @@ class MessageStore(Protocol):
     ) -> None: ...
 
     def load_messages(self, session_id: str) -> list[ChatMessage]: ...
+
+
+class ToolExecutionStatus(StrEnum):
+    PENDING = "pending"
+    STARTED = "started"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+class ToolExecutionStore(Protocol):
+    def record_tool_execution(
+        self,
+        session_id: str,
+        tool_call: "ToolCall",
+        *,
+        run_id: str,
+        status: ToolExecutionStatus,
+    ) -> None: ...
+
+    def update_tool_execution(
+        self,
+        call_id: str,
+        *,
+        status: ToolExecutionStatus,
+        result: str | None = None,
+    ) -> None: ...
 
 
 class TaskStatus(StrEnum):
@@ -107,12 +136,14 @@ class AgentSession:
         tools: ToolExecutor | None = None,
         trace_sink: TraceSink | None = None,
         message_store: MessageStore | None = None,
+        execution_store: ToolExecutionStore | None = None,
         session_id: str | None = None,
     ) -> None:
         self._model = model
         self._tools = tools
         self._trace_sink = trace_sink
         self._message_store = message_store
+        self._execution_store = execution_store
         self._session_id = (
             message_store.create_session()
             if message_store is not None and session_id is None
@@ -125,23 +156,33 @@ class AgentSession:
         )
         self._trace_run_id = ""
         self._trace_sequence = 0
+        self._run_state = RunStateMachine()
 
     def submit(self, user_input: str) -> TaskResult:
         self._trace_run_id = str(uuid4())
         self._trace_sequence = 0
+        self._run_state = RunStateMachine().transition(RunEvent.RUN_STARTED)
         self._append_message({"role": "user", "content": user_input})
         steps_used = 0
         previous_tool_batch: tuple[tuple[str, str], ...] | None = None
 
         while True:
-            self._emit_trace("agent_step", {"step": steps_used + 1})
+            self._emit_trace(
+                "agent_step",
+                {
+                    "step": steps_used + 1,
+                    "run_state": self._run_state.state.value,
+                },
+            )
             model_started = time.perf_counter()
             try:
                 response = self._model.complete(self._messages)
             except KeyboardInterrupt:
+                self._transition(RunEvent.USER_CANCELLED)
                 self._emit_task_end(TaskStatus.CANCELLED, StopReason.USER_CANCELLED, steps_used)
                 raise
             except ModelError:
+                self._transition(RunEvent.MODEL_ERROR)
                 self._emit_trace(
                     "model_call",
                     {"status": "error"},
@@ -163,6 +204,7 @@ class AgentSession:
 
             if not response.tool_calls:
                 self._append_message({"role": "assistant", "content": response.content})
+                self._transition(RunEvent.MODEL_FINAL_RESPONSE_PERSISTED)
                 self._emit_task_end(TaskStatus.COMPLETED, StopReason.FINAL_RESPONSE, steps_used)
                 return TaskResult(
                     status=TaskStatus.COMPLETED,
@@ -173,6 +215,7 @@ class AgentSession:
 
             tool_batch = _tool_batch_fingerprint(response.tool_calls)
             if tool_batch == previous_tool_batch:
+                self._transition(RunEvent.REPEATED_TOOL_CALL)
                 self._emit_task_end(TaskStatus.FAILED, StopReason.REPEATED_TOOL_CALL, steps_used)
                 return TaskResult(
                     status=TaskStatus.FAILED,
@@ -181,6 +224,7 @@ class AgentSession:
                     steps_used=steps_used,
                 )
             if steps_used >= MAX_AGENT_STEPS:
+                self._transition(RunEvent.BUDGET_EXHAUSTED)
                 self._emit_task_end(TaskStatus.FAILED, StopReason.MAX_STEPS, steps_used)
                 return TaskResult(
                     status=TaskStatus.FAILED,
@@ -197,7 +241,10 @@ class AgentSession:
                     "tool_calls": response.tool_calls,
                 }
             )
+            self._transition(RunEvent.MODEL_TOOL_CALLS_PERSISTED)
+            self._record_tool_executions(response.tool_calls, ToolExecutionStatus.PENDING)
             if self._tools is None:
+                self._transition(RunEvent.TOOL_ERROR)
                 self._emit_task_end(TaskStatus.FAILED, StopReason.TOOL_ERROR, steps_used)
                 return TaskResult(
                     status=TaskStatus.FAILED,
@@ -216,12 +263,17 @@ class AgentSession:
                     },
                 )
                 tool_started = time.perf_counter()
+                self._update_tool_execution(tool_call.id, ToolExecutionStatus.STARTED)
                 try:
                     tool_result = self._tools.execute(tool_call)
                 except KeyboardInterrupt:
+                    self._transition(RunEvent.USER_CANCELLED)
+                    self._update_tool_execution(tool_call.id, ToolExecutionStatus.UNKNOWN)
                     self._emit_task_end(TaskStatus.CANCELLED, StopReason.USER_CANCELLED, steps_used)
                     raise
                 except Exception:  # noqa: BLE001 - tool failures must not escape the harness
+                    self._transition(RunEvent.TOOL_ERROR)
+                    self._update_tool_execution(tool_call.id, ToolExecutionStatus.UNKNOWN)
                     self._emit_trace(
                         "tool_result",
                         {"tool_call_id": tool_call.id, "status": "exception"},
@@ -242,6 +294,13 @@ class AgentSession:
                     },
                     duration_ms=_elapsed_ms(tool_started),
                 )
+                self._update_tool_execution(
+                    tool_call.id,
+                    ToolExecutionStatus.SUCCEEDED
+                    if _tool_result_status(tool_result) == "ok"
+                    else ToolExecutionStatus.FAILED,
+                    tool_result,
+                )
                 self._append_message(
                     {
                         "role": "tool",
@@ -249,6 +308,7 @@ class AgentSession:
                         "content": tool_result,
                     }
                 )
+            self._transition(RunEvent.ALL_TOOLS_SUCCEEDED)
 
     def reset(self) -> None:
         self._messages.clear()
@@ -259,6 +319,13 @@ class AgentSession:
     def session_id(self) -> str | None:
         return self._session_id
 
+    @property
+    def run_state(self) -> RunState:
+        return self._run_state.state
+
+    def _transition(self, event: RunEvent) -> None:
+        self._run_state = self._run_state.transition(event)
+
     def _append_message(self, message: ChatMessage) -> None:
         self._messages.append(message)
         if self._message_store is not None and self._session_id is not None:
@@ -266,6 +333,34 @@ class AgentSession:
                 self._session_id,
                 message,
                 run_id=self._trace_run_id,
+            )
+
+    def _record_tool_executions(
+        self,
+        tool_calls: Sequence[ToolCall],
+        status: ToolExecutionStatus,
+    ) -> None:
+        if self._execution_store is None or self._session_id is None:
+            return
+        for tool_call in tool_calls:
+            self._execution_store.record_tool_execution(
+                self._session_id,
+                tool_call,
+                run_id=self._trace_run_id,
+                status=status,
+            )
+
+    def _update_tool_execution(
+        self,
+        call_id: str,
+        status: ToolExecutionStatus,
+        result: str | None = None,
+    ) -> None:
+        if self._execution_store is not None:
+            self._execution_store.update_tool_execution(
+                call_id,
+                status=status,
+                result=result,
             )
 
     def _emit_trace(

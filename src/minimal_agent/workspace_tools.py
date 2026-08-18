@@ -4,6 +4,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from minimal_agent.agent import ToolCall
+from minimal_agent.recovery import ToolRetryPolicy
 
 MAX_FILE_SIZE_BYTES = 64 * 1024
 
@@ -79,6 +80,11 @@ class WorkspaceTools:
                 },
             },
         )
+
+    def retry_policy(self, tool_name: str) -> ToolRetryPolicy:
+        if tool_name in {"read_file", "list_files"}:
+            return ToolRetryPolicy(is_idempotent=True, retry_allowed=True)
+        return ToolRetryPolicy(is_idempotent=False, retry_allowed=False)
 
     def _read_file(self, raw_arguments: str) -> str:
         arguments = _parse_arguments(raw_arguments, _ReadFileArguments)
