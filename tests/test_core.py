@@ -74,7 +74,11 @@ def test_stream_yields_incremental_content_and_preserves_terminal_order() -> Non
         EventKind.MODEL_RESPONSE,
         EventKind.FINAL_RESPONSE,
     ]
-    assert [event.data["content_delta"] for event in events if event.kind is EventKind.MODEL_CONTENT_DELTA] == [
+    assert [
+        event.data["content_delta"]
+        for event in events
+        if event.kind is EventKind.MODEL_CONTENT_DELTA
+    ] == [
         "hel",
         "lo",
     ]
@@ -90,7 +94,10 @@ def test_completed_stream_does_not_cancel_caller_control() -> None:
             yield ModelStreamChunk(content_delta="done", done=True)
 
     control = RunControl()
-    assert list(AgentCore(FinalStreamingModel()).stream("say", control))[-1].kind is EventKind.FINAL_RESPONSE
+    assert (
+        list(AgentCore(FinalStreamingModel()).stream("say", control))[-1].kind
+        is EventKind.FINAL_RESPONSE
+    )
     assert control.stop_reason is None
 
 
@@ -190,7 +197,9 @@ def test_steering_is_applied_at_the_next_model_boundary() -> None:
     worker.join(timeout=2)
 
     assert result_holder[0].final_response == "done"
-    assert any(event.kind is EventKind.STEERING_MESSAGE_ACCEPTED for event in result_holder[0].events)
+    assert any(
+        event.kind is EventKind.STEERING_MESSAGE_ACCEPTED for event in result_holder[0].events
+    )
     assert core.steer("too late") is False
 
 

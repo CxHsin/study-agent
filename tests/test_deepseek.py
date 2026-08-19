@@ -101,7 +101,9 @@ def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
 
 
 def test_deepseek_declares_provider_capabilities(tmp_path) -> None:
-    adapter = DeepSeekAdapter(api_key="test-key", tool_definitions=WorkspaceTools(tmp_path).definitions(), client=object())
+    adapter = DeepSeekAdapter(
+        api_key="test-key", tool_definitions=WorkspaceTools(tmp_path).definitions(), client=object()
+    )
 
     capabilities = adapter.capabilities()
 

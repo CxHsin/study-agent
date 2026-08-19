@@ -107,7 +107,9 @@ class EvalCase:
             tool_trace=trace,
             trajectory_mode=str(raw_expectation.get("trajectory_mode", "strict")),
             event_kinds=tuple(str(item) for item in _sequence(raw_expectation.get("event_kinds"))),
-            capabilities=tuple(str(item) for item in _sequence(raw_expectation.get("capabilities"))),
+            capabilities=tuple(
+                str(item) for item in _sequence(raw_expectation.get("capabilities"))
+            ),
             usage_source=_optional_str(raw_expectation.get("usage_source")),
             cache_hit_source=_optional_str(raw_expectation.get("cache_hit_source")),
         )
@@ -214,7 +216,9 @@ class _CountingModel:
             raise EvalLimitError("max_model_calls exceeded")
         self.calls += 1
         self.budget.calls += 1
-        self.budget.tokens += max(1, sum(len(str(value)) for message in messages for value in message.values()) // 4)
+        self.budget.tokens += max(
+            1, sum(len(str(value)) for message in messages for value in message.values()) // 4
+        )
         if self.budget.tokens > self.limits.token_budget:
             raise EvalLimitError("token_budget exceeded")
         yield from stream(messages)
@@ -328,17 +332,49 @@ def _hard_rules(
     ]
     if expected.event_kinds:
         observed = tuple(event.kind.value for event in result.events)
-        rules.append(RuleResult("event_kinds", observed == expected.event_kinds, f"expected {expected.event_kinds}, got {observed}"))
+        rules.append(
+            RuleResult(
+                "event_kinds",
+                observed == expected.event_kinds,
+                f"expected {expected.event_kinds}, got {observed}",
+            )
+        )
     for capability in expected.capabilities:
         supported = bool(getattr(capabilities, capability, False))
-        rules.append(RuleResult(f"capability:{capability}", supported, f"provider capability {capability}"))
-    usage_events = [event for event in result.events if event.kind.value == "model_response" and event.data.get("usage_record")]
+        rules.append(
+            RuleResult(f"capability:{capability}", supported, f"provider capability {capability}")
+        )
+    usage_events = [
+        event
+        for event in result.events
+        if event.kind.value == "model_response" and event.data.get("usage_record")
+    ]
     if expected.usage_source:
-        actual = getattr(usage_events[-1].data["usage_record"], "source", "unknown") if usage_events else "unknown"
-        rules.append(RuleResult("usage_source", actual == expected.usage_source, f"expected {expected.usage_source}, got {actual}"))
+        actual = (
+            getattr(usage_events[-1].data["usage_record"], "source", "unknown")
+            if usage_events
+            else "unknown"
+        )
+        rules.append(
+            RuleResult(
+                "usage_source",
+                actual == expected.usage_source,
+                f"expected {expected.usage_source}, got {actual}",
+            )
+        )
     if expected.cache_hit_source:
-        actual = getattr(usage_events[-1].data["usage_record"], "cache_hit_source", "unknown") if usage_events else "unknown"
-        rules.append(RuleResult("cache_hit_source", actual == expected.cache_hit_source, f"expected {expected.cache_hit_source}, got {actual}"))
+        actual = (
+            getattr(usage_events[-1].data["usage_record"], "cache_hit_source", "unknown")
+            if usage_events
+            else "unknown"
+        )
+        rules.append(
+            RuleResult(
+                "cache_hit_source",
+                actual == expected.cache_hit_source,
+                f"expected {expected.cache_hit_source}, got {actual}",
+            )
+        )
     return rules
 
 

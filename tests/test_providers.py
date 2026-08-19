@@ -20,7 +20,11 @@ def test_openai_adapter_maps_text_and_tool_calls() -> None:
             SimpleNamespace(
                 message=SimpleNamespace(
                     content=None,
-                    tool_calls=[SimpleNamespace(id="c1", function=SimpleNamespace(name="read", arguments="{}"))],
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="c1", function=SimpleNamespace(name="read", arguments="{}")
+                        )
+                    ],
                 )
             )
         ],

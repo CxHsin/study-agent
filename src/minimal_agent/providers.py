@@ -23,7 +23,11 @@ class OpenAIAdapter:
         client: Any | None = None,
     ) -> None:
         self.model_name = model
-        self._tools = tool_definitions.definitions() if isinstance(tool_definitions, ToolRegistry) else tuple(tool_definitions)
+        self._tools = (
+            tool_definitions.definitions()
+            if isinstance(tool_definitions, ToolRegistry)
+            else tuple(tool_definitions)
+        )
         if client is None:
             from openai import OpenAI
 
@@ -31,7 +35,9 @@ class OpenAIAdapter:
         self._client = client
 
     def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(streaming=False, tool_calls=True, usage=True, prompt_cache=False)
+        return ProviderCapabilities(
+            streaming=False, tool_calls=True, usage=True, prompt_cache=False
+        )
 
     def complete(self, messages: list[ChatMessage] | tuple[ChatMessage, ...]) -> ModelResponse:
         try:
@@ -65,7 +71,11 @@ class AnthropicAdapter:
         client: Any | None = None,
     ) -> None:
         self.model_name = model
-        definitions = tool_definitions.definitions() if isinstance(tool_definitions, ToolRegistry) else tuple(tool_definitions)
+        definitions = (
+            tool_definitions.definitions()
+            if isinstance(tool_definitions, ToolRegistry)
+            else tuple(tool_definitions)
+        )
         self._tools = tuple(_to_anthropic_tool(item) for item in definitions)
         if client is None:
             try:
@@ -76,7 +86,9 @@ class AnthropicAdapter:
         self._client = client
 
     def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(streaming=False, tool_calls=True, usage=True, prompt_cache=False)
+        return ProviderCapabilities(
+            streaming=False, tool_calls=True, usage=True, prompt_cache=False
+        )
 
     def complete(self, messages: list[ChatMessage] | tuple[ChatMessage, ...]) -> ModelResponse:
         try:
@@ -123,7 +135,9 @@ def _to_anthropic_tool(definition: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _to_anthropic_messages(messages: tuple[ChatMessage, ...] | list[ChatMessage]) -> tuple[str | None, list[dict[str, object]]]:
+def _to_anthropic_messages(
+    messages: tuple[ChatMessage, ...] | list[ChatMessage],
+) -> tuple[str | None, list[dict[str, object]]]:
     system: str | None = None
     converted: list[dict[str, object]] = []
     for message in messages:
