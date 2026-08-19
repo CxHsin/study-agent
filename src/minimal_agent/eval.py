@@ -69,6 +69,7 @@ class EvalCase:
     read_only_only: bool = True
     schema_version: str = "1"
     steering_messages: tuple[str, ...] = ()
+    follow_up_messages: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, object]) -> EvalCase:
@@ -128,6 +129,7 @@ class EvalCase:
             bool(data.get("read_only_only", True)),
             str(data.get("schema_version", "1")),
             tuple(str(item) for item in _sequence(data.get("steering_messages"))),
+            tuple(str(item) for item in _sequence(data.get("follow_up_messages"))),
         )
         if not case.case_id or case.max_steps < 1:
             raise EvalSchemaError("case_id must be non-empty and max_steps must be positive.")
@@ -300,6 +302,10 @@ class EvalRunner:
                     calls=counter.calls,
                     elapsed=started,
                 )
+            for message in case.follow_up_messages:
+                result = core.follow_up(message)
+                if result.error is not None:
+                    break
         except FuturesTimeoutError:
             return _inconclusive(case, "timeout", calls=counter.calls, elapsed=started)
         except EvalLimitError as error:

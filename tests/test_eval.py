@@ -163,6 +163,26 @@ def test_eval_case_can_drive_steering_messages() -> None:
     assert report.cases[0].hard_rules[-1].name == "steering_count"
 
 
+def test_eval_case_can_drive_follow_up_messages() -> None:
+    case = EvalCase.from_mapping(
+        {
+            "case_id": "follow-up",
+            "prompt": "first",
+            "follow_up_messages": ["second"],
+            "expectation": {"final_text": {"exact": "followed"}},
+        }
+    )
+    report = EvalRunner(
+        lambda _: ScriptedModel(
+            [ModelResponse(content="initial"), ModelResponse(content="followed")]
+        )
+    ).run([case])
+
+    assert report.status == "passed"
+    assert report.cases[0].run is not None
+    assert report.cases[0].run.final_response == "followed"
+
+
 def test_provider_exception_is_inconclusive_and_artifact_is_redacted(tmp_path) -> None:
     case = EvalCase.from_mapping(
         {
