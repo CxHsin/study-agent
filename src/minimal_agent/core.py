@@ -261,7 +261,8 @@ class AgentCore:
                         estimated_input=context.estimated_tokens,
                         latency_ms=(time.perf_counter() - model_started) * 1000,
                         capabilities=capabilities,
-                        local_cache_hit=local_cache_hit,
+                        # The checkpoint is observable bookkeeping; no local model computation is reused.
+                        local_cache_hit=False,
                     )
                 except ContextError as error:
                     return self._error(

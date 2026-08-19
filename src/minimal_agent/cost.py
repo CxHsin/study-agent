@@ -49,7 +49,9 @@ def checkpoint_for(
     prefix_hash = hashlib.sha256(normalized.encode()).hexdigest()
     schema_hash = hashlib.sha256(schema.encode()).hexdigest()
     system_hash = hashlib.sha256((system_prompt or "").encode()).hexdigest()
-    key_material = f"{prefix_hash}|{model}|{schema_hash}|{system_hash}|{context_builder}"
+    key_material = (
+        f"{session_id}|{prefix_hash}|{model}|{schema_hash}|{system_hash}|{context_builder}"
+    )
     return PromptCacheCheckpoint(
         hashlib.sha256(key_material.encode()).hexdigest(),
         session_id,

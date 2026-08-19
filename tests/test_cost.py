@@ -7,9 +7,11 @@ def test_checkpoint_is_stable_and_sensitive_to_contract_inputs() -> None:
     first = checkpoint_for(messages, session_id="s", message_index=1, model="m")
     same = checkpoint_for(messages, session_id="s", message_index=1, model="m")
     changed = checkpoint_for(messages, session_id="s", message_index=1, model="other")
+    other_session = checkpoint_for(messages, session_id="other", message_index=1, model="m")
 
     assert first == same
     assert first.key != changed.key
+    assert first.key != other_session.key
 
 
 def test_usage_distinguishes_provider_and_estimated_values() -> None:
