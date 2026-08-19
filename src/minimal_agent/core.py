@@ -10,7 +10,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from minimal_agent.context import ContextBuilder, ContextError, ModelSummarizer
-from minimal_agent.cost import checkpoint_for, usage_record
+from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
 from minimal_agent.protocol import (
     ChatMessage,
@@ -88,6 +88,7 @@ class AgentCore:
         self._max_steps = max_steps
         self._context_builder = context_builder or ContextBuilder(summarizer=ModelSummarizer(model))
         self._repository = repository
+        self._cache_store = PromptCacheStore()
         self._listeners: list[AgentEventListener] = []
         self._sequence = 0
         self._active_lock = threading.Lock()
@@ -117,9 +118,7 @@ class AgentCore:
             self._steering.put(message)
             return True
 
-    def stream(
-        self, user_input: str, control: RunControl | None = None
-    ) -> Iterator[AgentEvent]:
+    def stream(self, user_input: str, control: RunControl | None = None) -> Iterator[AgentEvent]:
         """Yield the same ordered events produced by a synchronous prompt run."""
         control = control or RunControl()
         events: queue.Queue[AgentEvent | object] = queue.Queue()
@@ -159,14 +158,23 @@ class AgentCore:
                 StopReason.ERROR,
                 0,
                 run_id,
-                RunError("SESSION_BUSY", "Conversation Session already has an active Run.", "control_error", 0),
+                RunError(
+                    "SESSION_BUSY",
+                    "Conversation Session already has an active Run.",
+                    "control_error",
+                    0,
+                ),
             )
             if event_sink is not None:
                 event_sink(
                     AgentEvent(
                         run_id,
                         EventKind.RUN_ERROR,
-                        {"stop_reason": StopReason.ERROR.value, "steps_used": 0, "error": result.error},
+                        {
+                            "stop_reason": StopReason.ERROR.value,
+                            "steps_used": 0,
+                            "error": result.error,
+                        },
                         1,
                         datetime.now(UTC),
                         0,
@@ -245,6 +253,15 @@ class AgentCore:
                         tool_schema=self._tools.definitions(),
                         system_prompt=self._session.system_prompt,
                         context_builder=self._context_builder.estimator.name,
+                    )
+                    local_cache_hit = self._cache_store.lookup(checkpoint)
+                    self._cache_store.record(checkpoint)
+                    usage = usage_record(
+                        response,
+                        estimated_input=context.estimated_tokens,
+                        latency_ms=(time.perf_counter() - model_started) * 1000,
+                        capabilities=capabilities,
+                        local_cache_hit=local_cache_hit,
                     )
                 except ContextError as error:
                     return self._error(
@@ -462,7 +479,9 @@ class AgentCore:
             self._session.system_prompt,
             self._session.messages,
         )
-        self._repository_call("finish_run", result.run_id, result.stop_reason.value, result.steps_used)
+        self._repository_call(
+            "finish_run", result.run_id, result.stop_reason.value, result.steps_used
+        )
         return RunResult(
             result.final_response,
             result.stop_reason,
@@ -645,8 +664,7 @@ def _model_response(
     if not completed:
         raise ModelError("Provider stream ended before completion.")
     tool_calls = tuple(
-        ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"])
-        for call_id in order
+        ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"]) for call_id in order
     )
     return ModelResponse(
         "".join(content_parts) or None,

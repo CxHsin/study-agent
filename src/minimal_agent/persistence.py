@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
@@ -13,11 +13,15 @@ SCHEMA_VERSION = 1
 
 
 class Repository(Protocol):
-    def save_session(self, session_id: str, system_prompt: str | None, messages: object) -> None: ...
+    def save_session(
+        self, session_id: str, system_prompt: str | None, messages: object
+    ) -> None: ...
 
     def start_run(self, run_id: str, session_id: str, parent_run_id: str | None = None) -> None: ...
 
-    def append_event(self, run_id: str, sequence: int, kind: str, data: Mapping[str, object]) -> None: ...
+    def append_event(
+        self, run_id: str, sequence: int, kind: str, data: Mapping[str, object]
+    ) -> None: ...
 
     def finish_run(self, run_id: str, stop_reason: str, steps_used: int) -> None: ...
 
@@ -36,12 +40,16 @@ class Repository(Protocol):
 
 class Redactor:
     _secret_key = re.compile(r"(?i)(api[_-]?key|authorization|cookie|token|secret|password)")
-    _secret = re.compile(r"(?i)(api[_-]?key|authorization|cookie|token|secret|password)\s*[:=]\s*[^,;\s]+")
+    _secret = re.compile(
+        r"(?i)(api[_-]?key|authorization|cookie|token|secret|password)\s*[:=]\s*[^,;\s]+"
+    )
 
     def redact(self, value: object) -> object:
         if isinstance(value, Mapping):
             return {
-                str(key): "[REDACTED]" if self._secret_key.fullmatch(str(key)) else self.redact(item)
+                str(key): "[REDACTED]"
+                if self._secret_key.fullmatch(str(key))
+                else self.redact(item)
                 for key, item in value.items()
             }
         if isinstance(value, (list, tuple)):
@@ -52,7 +60,16 @@ class Redactor:
 
 
 def _json(value: object, redactor: Redactor) -> str:
-    return json.dumps(redactor.redact(value), ensure_ascii=False, default=repr, separators=(",", ":"))
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass
+    return json.dumps(
+        redactor.redact(value), ensure_ascii=False, default=repr, separators=(",", ":")
+    )
 
 
 @dataclass(frozen=True)
@@ -74,10 +91,16 @@ class SQLiteRepository:
 
     def _migrate(self) -> None:
         with self._connection:
-            self._connection.execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            row = self._connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+            self._connection.execute(
+                "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            row = self._connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()
             if row is None:
-                self._connection.execute("INSERT INTO metadata VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+                self._connection.execute(
+                    "INSERT INTO metadata VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),)
+                )
             elif int(row[0]) != SCHEMA_VERSION:
                 raise RuntimeError(f"Unsupported repository schema version: {row[0]}")
             self._connection.executescript(
@@ -99,7 +122,7 @@ class SQLiteRepository:
                     run_id TEXT NOT NULL, call_id TEXT NOT NULL, name TEXT NOT NULL,
                     arguments TEXT NOT NULL, status TEXT NOT NULL, result_json TEXT,
                     idempotent INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (run_id, call_id)
+                    id INTEGER PRIMARY KEY AUTOINCREMENT
                 );
                 """
             )
@@ -108,7 +131,11 @@ class SQLiteRepository:
         with self._connection:
             self._connection.execute(
                 "INSERT INTO sessions VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET system_prompt=excluded.system_prompt, messages_json=excluded.messages_json",
-                (session_id, system_prompt, _json(messages, self.redactor)),
+                (
+                    session_id,
+                    _json(system_prompt, self.redactor) if system_prompt is not None else None,
+                    _json(messages, self.redactor),
+                ),
             )
 
     def start_run(self, run_id: str, session_id: str, parent_run_id: str | None = None) -> None:
@@ -118,7 +145,9 @@ class SQLiteRepository:
                 (run_id, session_id, parent_run_id, datetime.now(UTC).isoformat()),
             )
 
-    def append_event(self, run_id: str, sequence: int, kind: str, data: Mapping[str, object]) -> None:
+    def append_event(
+        self, run_id: str, sequence: int, kind: str, data: Mapping[str, object]
+    ) -> None:
         with self._connection:
             self._connection.execute(
                 "INSERT INTO events(run_id, sequence, kind, data_json, format_version) VALUES (?, ?, ?, ?, ?)",
@@ -145,8 +174,16 @@ class SQLiteRepository:
     ) -> None:
         with self._connection:
             self._connection.execute(
-                "INSERT INTO tool_executions(run_id, call_id, name, arguments, status, result_json, idempotent) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, call_id) DO UPDATE SET status=excluded.status, result_json=excluded.result_json",
-                (run_id, call_id, name, _json(arguments, self.redactor), status, _json(result, self.redactor) if result else None, int(idempotent)),
+                "INSERT INTO tool_executions(run_id, call_id, name, arguments, status, result_json, idempotent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    call_id,
+                    name,
+                    _json(arguments, self.redactor),
+                    status,
+                    _json(result, self.redactor) if result else None,
+                    int(idempotent),
+                ),
             )
 
     def unresolved_tools(self) -> tuple[UnresolvedTool, ...]:
@@ -156,11 +193,15 @@ class SQLiteRepository:
         return tuple(UnresolvedTool(*row) for row in rows)
 
     def run_status(self, run_id: str) -> str | None:
-        row = self._connection.execute("SELECT status FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        row = self._connection.execute(
+            "SELECT status FROM runs WHERE run_id=?", (run_id,)
+        ).fetchone()
         return row[0] if row else None
 
     def event_count(self, run_id: str) -> int:
-        row = self._connection.execute("SELECT COUNT(*) FROM events WHERE run_id=?", (run_id,)).fetchone()
+        row = self._connection.execute(
+            "SELECT COUNT(*) FROM events WHERE run_id=?", (run_id,)
+        ).fetchone()
         return int(row[0])
 
     def event_payloads(self, run_id: str) -> tuple[dict[str, object], ...]:
@@ -175,7 +216,14 @@ class SQLiteRepository:
     def retry_tool(
         self, run_id: str, call_id: str, continuation_run_id: str, session_id: str
     ) -> UnresolvedTool:
-        tool = next((item for item in self.unresolved_tools() if item.run_id == run_id and item.call_id == call_id), None)
+        tool = next(
+            (
+                item
+                for item in self.unresolved_tools()
+                if item.run_id == run_id and item.call_id == call_id
+            ),
+            None,
+        )
         if tool is None:
             raise KeyError(f"Unknown unresolved Tool Execution: {run_id}/{call_id}")
         if not tool.idempotent:

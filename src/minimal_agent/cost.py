@@ -40,8 +40,12 @@ def checkpoint_for(
     context_builder: str = "default",
 ) -> PromptCacheCheckpoint:
     prefix = messages[:message_index]
-    normalized = json.dumps(prefix, ensure_ascii=False, sort_keys=True, default=repr, separators=(",", ":"))
-    schema = json.dumps(tool_schema, ensure_ascii=False, sort_keys=True, default=repr, separators=(",", ":"))
+    normalized = json.dumps(
+        prefix, ensure_ascii=False, sort_keys=True, default=repr, separators=(",", ":")
+    )
+    schema = json.dumps(
+        tool_schema, ensure_ascii=False, sort_keys=True, default=repr, separators=(",", ":")
+    )
     prefix_hash = hashlib.sha256(normalized.encode()).hexdigest()
     schema_hash = hashlib.sha256(schema.encode()).hexdigest()
     system_hash = hashlib.sha256((system_prompt or "").encode()).hexdigest()
@@ -65,6 +69,7 @@ def usage_record(
     latency_ms: float | None = None,
     cost: float | None = None,
     capabilities: ProviderCapabilities | None = None,
+    local_cache_hit: bool = False,
 ) -> UsageRecord:
     usage: ModelUsage | None = response.usage
     reported = usage is not None and not usage.estimated
@@ -72,8 +77,30 @@ def usage_record(
         usage.input_tokens if usage else estimated_input,
         usage.output_tokens if usage else estimated_output,
         usage.cached_tokens if usage else None,
-        latency_ms,
-        cost,
-        "provider" if reported else "estimated" if usage or estimated_input is not None else "unknown",
-        "provider" if response.provider_cache_hit is not None and (capabilities is None or capabilities.prompt_cache) else "unknown",
+        usage.latency_ms if usage and usage.latency_ms is not None else latency_ms,
+        usage.cost if usage and usage.cost is not None else cost,
+        "provider"
+        if reported
+        else "estimated"
+        if usage or estimated_input is not None
+        else "unknown",
+        "both"
+        if local_cache_hit and response.provider_cache_hit
+        else "local"
+        if local_cache_hit
+        else "provider"
+        if response.provider_cache_hit is not None
+        and (capabilities is None or capabilities.prompt_cache)
+        else "unknown",
     )
+
+
+class PromptCacheStore:
+    def __init__(self) -> None:
+        self._checkpoints: dict[str, PromptCacheCheckpoint] = {}
+
+    def lookup(self, checkpoint: PromptCacheCheckpoint) -> bool:
+        return checkpoint.key in self._checkpoints
+
+    def record(self, checkpoint: PromptCacheCheckpoint) -> None:
+        self._checkpoints[checkpoint.key] = checkpoint
