@@ -10,6 +10,8 @@ class EventKind(StrEnum):
     RUN_STARTED = "run_started"
     MODEL_CALL_STARTED = "model_call_started"
     MODEL_RESPONSE = "model_response"
+    MODEL_CONTENT_DELTA = "model_content_delta"
+    TOOL_CALL_DELTA = "tool_call_delta"
     TOOL_CALL_REQUESTED = "tool_call_requested"
     TOOL_RESULT_PRODUCED = "tool_result_produced"
     FINAL_RESPONSE = "final_response"

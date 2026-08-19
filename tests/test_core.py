@@ -3,7 +3,7 @@ from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore, RunControl, StopReason
 from minimal_agent.events import EventKind
-from minimal_agent.protocol import ChatMessage, ModelResponse, ToolCall
+from minimal_agent.protocol import ChatMessage, ModelResponse, ModelStreamChunk, ToolCall
 from minimal_agent.tools import ToolDefinition, ToolRegistry
 from minimal_agent.workspace_tools import WorkspaceTools
 
@@ -52,6 +52,86 @@ def test_core_runs_tool_loop_and_publishes_ordered_events() -> None:
         "final_response",
     ]
     assert [event.sequence for event in events] == list(range(1, 9))
+
+
+def test_stream_yields_incremental_content_and_preserves_terminal_order() -> None:
+    class StreamingModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            raise AssertionError("streaming model should use stream")
+
+        def stream(self, messages: Sequence[ChatMessage]):
+            yield ModelStreamChunk(content_delta="hel")
+            yield ModelStreamChunk(content_delta="lo")
+
+    events = list(AgentCore(StreamingModel()).stream("say hello"))
+
+    assert [event.kind for event in events] == [
+        EventKind.RUN_STARTED,
+        EventKind.MODEL_CALL_STARTED,
+        EventKind.MODEL_CONTENT_DELTA,
+        EventKind.MODEL_CONTENT_DELTA,
+        EventKind.MODEL_RESPONSE,
+        EventKind.FINAL_RESPONSE,
+    ]
+    assert [event.data["content_delta"] for event in events if event.kind is EventKind.MODEL_CONTENT_DELTA] == [
+        "hel",
+        "lo",
+    ]
+    assert events[-1].data["content"] == "hello"
+
+
+def test_stream_buffers_tool_call_fragments_before_execution() -> None:
+    class StreamingToolModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            raise AssertionError("streaming model should use stream")
+
+        def stream(self, messages: Sequence[ChatMessage]):
+            self.calls += 1
+            if self.calls == 1:
+                yield ModelStreamChunk(tool_call_id="call-1", tool_name="echo")
+                yield ModelStreamChunk(tool_call_id="call-1", arguments_delta='{"value":')
+                yield ModelStreamChunk(tool_call_id="call-1", arguments_delta=" 7}", done=True)
+            else:
+                yield ModelStreamChunk(content_delta="done", done=True)
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                "echo",
+                "Echo a value",
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+                lambda args: args["value"],
+            )
+        ]
+    )
+    events = list(AgentCore(StreamingToolModel(), registry).stream("echo"))
+
+    assert any(event.kind is EventKind.TOOL_CALL_DELTA for event in events)
+    tool_result = next(event for event in events if event.kind is EventKind.TOOL_RESULT_PRODUCED)
+    assert '"ok":true' in str(tool_result.data["result"])
+    assert events[-1].kind is EventKind.FINAL_RESPONSE
+
+
+def test_stream_rejects_incomplete_tool_call_fragments() -> None:
+    class IncompleteModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            raise AssertionError("streaming model should use stream")
+
+        def stream(self, messages: Sequence[ChatMessage]):
+            yield ModelStreamChunk(tool_call_id="call-1", arguments_delta='{"value": 7}')
+
+    events = list(AgentCore(IncompleteModel()).stream("echo"))
+
+    error = next(event for event in events if event.kind is EventKind.RUN_ERROR)
+    assert error.data["error"].code == "MODEL_ERROR"
 
 
 def test_registry_turns_unknown_tool_into_structured_result() -> None:

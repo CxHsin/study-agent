@@ -143,3 +143,55 @@ _Avoid_: Agent Run, benchmark score
 **Trajectory Comparison**:
 The deterministic comparison of observed Tool Calls against a Case expectation under a selected Trajectory Mode.
 _Avoid_: Text similarity, Judge Result
+
+**Streaming Event**:
+An incremental Agent Event emitted while a Run is progressing, including partial model output or a completed lifecycle transition.
+_Avoid_: Log record, final response
+
+**Steering Message**:
+A user message accepted during an active Run and applied at the next model-call boundary to influence the remaining decision cycle.
+_Avoid_: Follow-up message, tool cancellation
+
+**Follow-up Message**:
+A user message that starts a new Run while continuing the same Conversation Session after a prior Run has ended.
+_Avoid_: Steering Message, retry command
+
+**Provider Capability**:
+An explicit declaration of which protocol features a Provider Adapter supports, such as streaming, tool calls, usage reporting, or prompt-cache metadata.
+_Avoid_: Provider-specific workaround, feature flag
+
+**Recovery Checkpoint**:
+A persisted safe boundary containing enough Session and Run records to resume after a process restart without assuming an unfinished external Tool Execution can be replayed.
+_Avoid_: Snapshot-only backup, arbitrary event offset
+
+**Prompt Cache Checkpoint**:
+A stable message-prefix boundary used to measure or reuse prompt work, separately from any cache-hit information reported by a Provider.
+_Avoid_: Context Summary, token estimate
+
+**Run State**:
+The persisted lifecycle position of a Run, including active waiting boundaries and terminal outcomes, used to decide whether it can continue after restart.
+_Avoid_: Stop Reason, process status
+
+**Tool Resolution**:
+An explicit decision that supplies or confirms the outcome of a Tool Call whose execution was interrupted or remains unknown after recovery.
+_Avoid_: Tool retry, exception handling
+
+**Usage Record**:
+Per-model-call accounting data for input, output, cached tokens, latency, and cost status, with estimated values distinguished from Provider-reported values.
+_Avoid_: Token estimator, billing invoice
+
+**Cache Hit Source**:
+The origin of a prompt-cache hit classification: local checkpoint, Provider metadata, both, or estimated/unknown.
+_Avoid_: Cache key, Context Summary
+
+**Continuation Run**:
+A new Run created to continue or compensate for an earlier Run after retry or Tool Resolution, linked by a parent Run identifier.
+_Avoid_: Replayed Run, duplicate Run
+
+**Capability Fallback**:
+The configured behavior when a Provider lacks an optional capability, such as degrading streaming, marking usage unknown, or relying on local cache metrics.
+_Avoid_: Silent emulation, Provider error
+
+**Checkpoint Invalidation**:
+The rule that prevents reuse of a local Prompt Cache Checkpoint when model-facing inputs or the context-building contract have changed.
+_Avoid_: Session clear, cache eviction

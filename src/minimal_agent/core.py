@@ -1,5 +1,8 @@
 import json
+import queue
+import threading
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -8,7 +11,14 @@ from uuid import uuid4
 
 from minimal_agent.context import ContextBuilder, ContextError, ModelSummarizer
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
-from minimal_agent.protocol import ModelAdapter, ModelError, ToolCall
+from minimal_agent.protocol import (
+    ChatMessage,
+    ModelAdapter,
+    ModelError,
+    ModelResponse,
+    ModelStreamChunk,
+    ToolCall,
+)
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolError, ToolRegistry, ToolResult
 
@@ -85,6 +95,35 @@ class AgentCore:
         return self._session
 
     def prompt(self, user_input: str, control: RunControl | None = None) -> RunResult:
+        return self._execute_prompt(user_input, control)
+
+    def stream(
+        self, user_input: str, control: RunControl | None = None
+    ) -> Iterator[AgentEvent]:
+        """Yield the same ordered events produced by a synchronous prompt run."""
+        events: queue.Queue[AgentEvent | object] = queue.Queue()
+        finished = object()
+
+        def run() -> None:
+            try:
+                self._execute_prompt(user_input, control, event_sink=events.put)
+            finally:
+                events.put(finished)
+
+        threading.Thread(target=run, name="minimal-agent-stream", daemon=True).start()
+        while True:
+            event = events.get()
+            if event is finished:
+                return
+            yield event  # type narrowing is not available for the sentinel union
+
+    def _execute_prompt(
+        self,
+        user_input: str,
+        control: RunControl | None = None,
+        *,
+        event_sink: Callable[[AgentEvent], None] | None = None,
+    ) -> RunResult:
         run_id = str(uuid4())
         control = control or RunControl()
         self._sequence = 0
@@ -94,7 +133,7 @@ class AgentCore:
         context_metadata: list[dict[str, object]] = []
         self._session.append({"role": "user", "content": user_input})
         emit = lambda kind, data: self._emit(
-            run_id, kind, data, trace, started_at, disabled_listeners
+            run_id, kind, data, trace, started_at, disabled_listeners, event_sink
         )
         emit(
             EventKind.RUN_STARTED,
@@ -131,7 +170,7 @@ class AgentCore:
                         "estimator": self._context_builder.estimator.name,
                     }
                     context_metadata.append(metadata)
-                    response = self._model.complete(context.messages)
+                    response = _model_response(self._model, context.messages, emit, step)
                 except ContextError as error:
                     return self._error(
                         run_id,
@@ -323,6 +362,7 @@ class AgentCore:
         trace: list[AgentEvent],
         started_at: float,
         disabled_listeners: set[int],
+        event_sink: Callable[[AgentEvent], None] | None = None,
     ) -> None:
         self._sequence += 1
         event = AgentEvent(
@@ -334,6 +374,8 @@ class AgentCore:
             (time.perf_counter() - started_at) * 1000,
         )
         trace.append(event)
+        if event_sink is not None:
+            event_sink(event)
         for index, listener in enumerate(self._listeners):
             if index in disabled_listeners:
                 continue
@@ -348,6 +390,7 @@ class AgentCore:
                     trace,
                     started_at,
                     disabled_listeners,
+                    event_sink,
                 )
 
 
@@ -377,3 +420,52 @@ def _fingerprint(tool_call: ToolCall) -> str:
     except (TypeError, json.JSONDecodeError):
         arguments = tool_call.arguments.strip()
     return f"{tool_call.name}\0{arguments}"
+
+
+def _model_response(
+    model: ModelAdapter,
+    messages: tuple[ChatMessage, ...],
+    emit: Callable[[EventKind, dict[str, object]], None],
+    step: int,
+) -> ModelResponse:
+    stream = getattr(model, "stream", None)
+    if not callable(stream):
+        return model.complete(messages)
+
+    content_parts: list[str] = []
+    calls: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for chunk in stream(messages):
+        if not isinstance(chunk, ModelStreamChunk):
+            raise ModelError("Provider returned an invalid stream chunk.")
+        if chunk.content_delta:
+            content_parts.append(chunk.content_delta)
+            emit(
+                EventKind.MODEL_CONTENT_DELTA,
+                {"step": step, "content_delta": chunk.content_delta},
+            )
+        if chunk.tool_call_id is not None:
+            if chunk.tool_call_id not in calls:
+                calls[chunk.tool_call_id] = {"name": chunk.tool_name or "", "arguments": ""}
+                order.append(chunk.tool_call_id)
+            call = calls[chunk.tool_call_id]
+            if chunk.tool_name:
+                call["name"] = chunk.tool_name
+            if chunk.arguments_delta:
+                call["arguments"] += chunk.arguments_delta
+            emit(
+                EventKind.TOOL_CALL_DELTA,
+                {
+                    "step": step,
+                    "tool_call_id": chunk.tool_call_id,
+                    "name": chunk.tool_name,
+                    "arguments_delta": chunk.arguments_delta,
+                },
+            )
+    if any(not calls[call_id]["name"] or not calls[call_id]["arguments"] for call_id in order):
+        raise ModelError("Provider returned an incomplete Tool Call.")
+    tool_calls = tuple(
+        ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"])
+        for call_id in order
+    )
+    return ModelResponse("".join(content_parts) or None, tool_calls)
