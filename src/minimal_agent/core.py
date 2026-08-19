@@ -385,13 +385,22 @@ class AgentCore:
                     last_fingerprint = fingerprint
                     definition = self._tools.get(tool_call.name)
                     emit(EventKind.TOOL_CALL_REQUESTED, _tool_data(tool_call))
-                    result = self._tools.execute(tool_call, run_id=run_id, user_input=user_input)
                     self._repository_call(
-                        "record_tool_lifecycle",
+                        "record_tool_started",
                         run_id,
                         tool_call.id,
                         tool_call.name,
                         tool_call.arguments,
+                        idempotent=definition.idempotent if definition else False,
+                    )
+                    result = self._tools.execute(tool_call, run_id=run_id, user_input=user_input)
+                    self._repository_call(
+                        "record_tool",
+                        run_id,
+                        tool_call.id,
+                        tool_call.name,
+                        tool_call.arguments,
+                        "completed",
                         result.to_json(),
                         idempotent=definition.idempotent if definition else False,
                     )

@@ -136,3 +136,10 @@ def test_event_redaction_handles_nested_dataclass_values(tmp_path) -> None:
 
     payload = repository.event_payloads("run")[0]
     assert payload["error"]["message"] == "api_key=[REDACTED]"
+
+
+def test_repository_records_tool_started_before_external_execution(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "started-before-failure.sqlite")
+    repository.record_tool_started("run", "call", "unstable", "{}")
+
+    assert repository.unresolved_tools()[0].call_id == "call"
