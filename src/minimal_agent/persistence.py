@@ -4,10 +4,12 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
+
+from minimal_agent.protocol import ToolCall
 
 SCHEMA_VERSION = 1
 
@@ -77,8 +79,7 @@ class Redactor:
 
 
 def _json(value: object, redactor: Redactor) -> str:
-    if is_dataclass(value):
-        value = asdict(value)
+    value = _jsonable(value)
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -87,6 +88,34 @@ def _json(value: object, redactor: Redactor) -> str:
     return json.dumps(
         redactor.redact(value), ensure_ascii=False, default=repr, separators=(",", ":")
     )
+
+
+def _jsonable(value: object) -> object:
+    """Convert nested protocol records to JSON-compatible primitives."""
+    if is_dataclass(value):
+        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _restore_messages(messages: object) -> tuple[dict[str, object], ...]:
+    restored: list[dict[str, object]] = []
+    for raw in messages if isinstance(messages, list) else ():
+        if not isinstance(raw, dict):
+            continue
+        message = dict(raw)
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            message["tool_calls"] = tuple(
+                ToolCall(str(call["id"]), str(call["name"]), str(call["arguments"]))
+                for call in calls
+                if isinstance(call, dict) and {"id", "name", "arguments"}.issubset(call)
+            )
+        restored.append(message)
+    return tuple(restored)
 
 
 @dataclass(frozen=True)
@@ -170,7 +199,7 @@ class SQLiteRepository:
             except json.JSONDecodeError:
                 pass
         messages = json.loads(row[1])
-        return system_prompt, tuple(messages)
+        return system_prompt, _restore_messages(messages)
 
     def latest_session(self) -> tuple[str, str | None, tuple[dict[str, object], ...]] | None:
         row = self._connection.execute(
@@ -184,7 +213,7 @@ class SQLiteRepository:
                 system_prompt = json.loads(system_prompt)
             except json.JSONDecodeError:
                 pass
-        return row[0], system_prompt, tuple(json.loads(row[2]))
+        return row[0], system_prompt, _restore_messages(json.loads(row[2]))
 
     def continuation_session(
         self, run_id: str

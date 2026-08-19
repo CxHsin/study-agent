@@ -2,7 +2,7 @@ from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore
 from minimal_agent.persistence import InMemoryRepository, SQLiteRepository
-from minimal_agent.protocol import ChatMessage, ModelResponse
+from minimal_agent.protocol import ChatMessage, ModelResponse, ToolCall
 from minimal_agent.session import AgentSession
 
 
@@ -104,3 +104,35 @@ def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) ->
     assert repository.load_session("session") == ("system", ({"role": "user", "content": "hello"},))
     repository.recover()
     assert repository.run_status("run") == "needs_resolution"
+
+
+def test_session_round_trip_restores_nested_tool_calls(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "tool-history.sqlite")
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": (ToolCall("call", "read", '{"path":"notes"}'),),
+        }
+    ]
+
+    repository.save_session("s", None, messages)
+
+    loaded = repository.load_session("s")
+    assert loaded is not None
+    assert loaded[1][0]["tool_calls"] == (ToolCall("call", "read", '{"path":"notes"}'),)
+
+
+def test_event_redaction_handles_nested_dataclass_values(tmp_path) -> None:
+    from minimal_agent.core import RunError
+
+    repository = SQLiteRepository(tmp_path / "event-redaction.sqlite")
+    repository.append_event(
+        "run",
+        1,
+        "run_error",
+        {"error": RunError("X", "api_key=supersecret", "provider", 1)},
+    )
+
+    payload = repository.event_payloads("run")[0]
+    assert payload["error"]["message"] == "api_key=[REDACTED]"
