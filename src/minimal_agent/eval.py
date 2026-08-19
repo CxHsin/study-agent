@@ -8,8 +8,9 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from minimal_agent.core import AgentCore, RunResult, StopReason
@@ -160,7 +161,7 @@ class EvalReport:
     def to_jsonl(self, path: Path) -> None:
         with path.open("w", encoding="utf-8") as handle:
             for case in self.cases:
-                payload = _redact(asdict(case))
+                payload = _redact(_artifact_value(case))
                 handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 
@@ -500,6 +501,21 @@ def _redact(value: Any) -> Any:
             lambda match: match.group(1) + "=[REDACTED]",
             value,
         )
+    return value
+
+
+def _artifact_value(value: Any) -> Any:
+    if is_dataclass(value):
+        return {
+            field.name: _artifact_value(getattr(value, field.name))
+            for field in value.__dataclass_fields__.values()
+        }
+    if isinstance(value, MappingProxyType):
+        return {key: _artifact_value(item) for key, item in value.items()}
+    if isinstance(value, Mapping):
+        return {key: _artifact_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_artifact_value(item) for item in value]
     return value
 
 

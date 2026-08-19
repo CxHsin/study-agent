@@ -98,6 +98,16 @@ def test_eval_optional_event_and_usage_assertions_remain_deterministic() -> None
     assert report.cases[0].hard_rules[-2].name == "usage_source"
 
 
+def test_successful_eval_artifact_serializes_trace_data(tmp_path) -> None:
+    case = EvalCase.from_mapping({"case_id": "ok", "prompt": "hi", "expectation": {}})
+    report = EvalRunner(lambda _: ScriptedModel([ModelResponse(content="ok")])).run([case])
+    artifact = tmp_path / "artifact.jsonl"
+
+    report.to_jsonl(artifact)
+
+    assert '"case_id": "ok"' in artifact.read_text(encoding="utf-8")
+
+
 def test_provider_exception_is_inconclusive_and_artifact_is_redacted(tmp_path) -> None:
     case = EvalCase.from_mapping(
         {

@@ -435,6 +435,12 @@ class AgentCore:
                 self._active_control = None
                 self._steering_open = False
             self._apply_pending_steering_to_session()
+            self._repository_call(
+                "save_session",
+                self._session.session_id,
+                self._session.system_prompt,
+                self._session.messages,
+            )
             self._session.release_run()
 
     def _discard_pending_steering(self) -> None:
