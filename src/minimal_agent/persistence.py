@@ -186,6 +186,17 @@ class SQLiteRepository:
                 pass
         return row[0], system_prompt, tuple(json.loads(row[2]))
 
+    def continuation_session(
+        self, run_id: str
+    ) -> tuple[str, str | None, tuple[dict[str, object], ...]] | None:
+        row = self._connection.execute(
+            "SELECT session_id FROM runs WHERE run_id=? AND parent_run_id IS NOT NULL", (run_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        loaded = self.load_session(row[0])
+        return None if loaded is None else (row[0], loaded[0], loaded[1])
+
     def recover(self) -> tuple[UnresolvedTool, ...]:
         unresolved = self.unresolved_tools()
         with self._connection:

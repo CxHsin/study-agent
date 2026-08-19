@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from minimal_agent.core import AgentCore
 from minimal_agent.persistence import InMemoryRepository, SQLiteRepository
 from minimal_agent.protocol import ChatMessage, ModelResponse
+from minimal_agent.session import AgentSession
 
 
 def test_sqlite_repository_preserves_events_and_unresolved_tool(tmp_path) -> None:
@@ -76,6 +77,22 @@ def test_tool_lifecycle_is_committed_as_one_transaction(tmp_path) -> None:
         "SELECT status FROM tool_executions WHERE run_id='run' ORDER BY id"
     ).fetchall()
     assert [item[0] for item in statuses] == ["requested", "started", "completed"]
+
+
+def test_core_continues_a_persisted_continuation_run(tmp_path) -> None:
+    class FinalModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            return ModelResponse(content="continued")
+
+    repository = SQLiteRepository(tmp_path / "continuation.sqlite")
+    repository.save_session("s", None, [{"role": "user", "content": "old"}])
+    repository.start_run("parent", "s")
+    repository.create_continuation("parent", "child", "s")
+    core = AgentCore(FinalModel(), session=AgentSession(session_id="s"), repository=repository)
+
+    result = core.continue_run("child", "continue")
+
+    assert result.final_response == "continued"
 
 
 def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:

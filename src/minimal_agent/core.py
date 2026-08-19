@@ -110,6 +110,17 @@ class AgentCore:
         """Start a new Run using the existing Conversation Session."""
         return self.prompt(user_input, control)
 
+    def continue_run(
+        self, continuation_run_id: str, user_input: str, control: RunControl | None = None
+    ) -> RunResult:
+        """Resume a persisted continuation using the current Session boundary."""
+        if self._repository is None:
+            raise RuntimeError("A Repository is required to continue a persisted Run.")
+        lookup = getattr(self._repository, "continuation_session", None)
+        if not callable(lookup) or lookup(continuation_run_id) is None:
+            raise KeyError(f"Unknown continuation Run: {continuation_run_id}")
+        return self.prompt(user_input, control)
+
     def steer(self, message: str) -> bool:
         """Queue a user message for the next model-call boundary of the active Run."""
         with self._active_lock:
