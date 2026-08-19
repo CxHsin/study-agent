@@ -1,4 +1,5 @@
 import json
+import threading
 from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore, RunControl, StopReason
@@ -132,6 +133,76 @@ def test_stream_rejects_incomplete_tool_call_fragments() -> None:
 
     error = next(event for event in events if event.kind is EventKind.RUN_ERROR)
     assert error.data["error"].code == "MODEL_ERROR"
+
+
+def test_steering_is_applied_at_the_next_model_boundary() -> None:
+    first_call_started = threading.Event()
+    release_first_call = threading.Event()
+
+    class SteerableModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            self.calls += 1
+            if self.calls == 1:
+                first_call_started.set()
+                release_first_call.wait(timeout=2)
+                return ModelResponse(tool_calls=(ToolCall("call-1", "echo", '{"value": 1}'),))
+            assert messages[-1]["content"] == "please use the other value"
+            return ModelResponse(content="done")
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                "echo",
+                "Echo",
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "integer"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+                lambda args: args["value"],
+            )
+        ]
+    )
+    core = AgentCore(SteerableModel(), registry)
+    result_holder = []
+    worker = threading.Thread(target=lambda: result_holder.append(core.prompt("start")))
+    worker.start()
+    assert first_call_started.wait(timeout=2)
+    assert core.steer("please use the other value") is True
+    release_first_call.set()
+    worker.join(timeout=2)
+
+    assert result_holder[0].final_response == "done"
+    assert any(event.kind is EventKind.STEERING_MESSAGE_ACCEPTED for event in result_holder[0].events)
+    assert core.steer("too late") is False
+
+
+def test_concurrent_prompt_is_rejected_for_one_session() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            started.set()
+            release.wait(timeout=2)
+            return ModelResponse(content="done")
+
+    core = AgentCore(SlowModel())
+    first_result = []
+    worker = threading.Thread(target=lambda: first_result.append(core.prompt("first")))
+    worker.start()
+    assert started.wait(timeout=2)
+    second = core.prompt("second")
+    release.set()
+    worker.join(timeout=2)
+
+    assert second.error is not None
+    assert second.error.code == "SESSION_BUSY"
+    assert first_result[0].final_response == "done"
 
 
 def test_registry_turns_unknown_tool_into_structured_result() -> None:

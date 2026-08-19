@@ -12,6 +12,7 @@ class EventKind(StrEnum):
     MODEL_RESPONSE = "model_response"
     MODEL_CONTENT_DELTA = "model_content_delta"
     TOOL_CALL_DELTA = "tool_call_delta"
+    STEERING_MESSAGE_ACCEPTED = "steering_message_accepted"
     TOOL_CALL_REQUESTED = "tool_call_requested"
     TOOL_RESULT_PRODUCED = "tool_result_produced"
     FINAL_RESPONSE = "final_response"

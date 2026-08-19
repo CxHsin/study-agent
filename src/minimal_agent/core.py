@@ -86,6 +86,10 @@ class AgentCore:
         self._context_builder = context_builder or ContextBuilder(summarizer=ModelSummarizer(model))
         self._listeners: list[AgentEventListener] = []
         self._sequence = 0
+        self._active_lock = threading.Lock()
+        self._active_control: RunControl | None = None
+        self._steering_open = False
+        self._steering: queue.Queue[str] = queue.Queue()
 
     def subscribe(self, listener: AgentEventListener) -> None:
         self._listeners.append(listener)
@@ -97,10 +101,23 @@ class AgentCore:
     def prompt(self, user_input: str, control: RunControl | None = None) -> RunResult:
         return self._execute_prompt(user_input, control)
 
+    def follow_up(self, user_input: str, control: RunControl | None = None) -> RunResult:
+        """Start a new Run using the existing Conversation Session."""
+        return self.prompt(user_input, control)
+
+    def steer(self, message: str) -> bool:
+        """Queue a user message for the next model-call boundary of the active Run."""
+        with self._active_lock:
+            if self._active_control is None or not self._steering_open:
+                return False
+            self._steering.put(message)
+            return True
+
     def stream(
         self, user_input: str, control: RunControl | None = None
     ) -> Iterator[AgentEvent]:
         """Yield the same ordered events produced by a synchronous prompt run."""
+        control = control or RunControl()
         events: queue.Queue[AgentEvent | object] = queue.Queue()
         finished = object()
 
@@ -111,11 +128,15 @@ class AgentCore:
                 events.put(finished)
 
         threading.Thread(target=run, name="minimal-agent-stream", daemon=True).start()
-        while True:
-            event = events.get()
-            if event is finished:
-                return
-            yield event  # type narrowing is not available for the sentinel union
+        try:
+            while True:
+                event = events.get()
+                if event is finished:
+                    return
+                yield event  # type narrowing is not available for the sentinel union
+        finally:
+            if control is not None:
+                control.cancel()
 
     def _execute_prompt(
         self,
@@ -126,6 +147,17 @@ class AgentCore:
     ) -> RunResult:
         run_id = str(uuid4())
         control = control or RunControl()
+        if not self._session.try_acquire_run():
+            return RunResult(
+                None,
+                StopReason.ERROR,
+                0,
+                run_id,
+                RunError("SESSION_BUSY", "Conversation Session already has an active Run.", "control_error", 0),
+            )
+        with self._active_lock:
+            self._active_control = control
+            self._steering_open = True
         self._sequence = 0
         trace: list[AgentEvent] = []
         started_at = time.perf_counter()
@@ -150,6 +182,7 @@ class AgentCore:
                 stop = _control_stop(control)
                 if stop:
                     return self._result(run_id, stop, step - 1, trace, emit, context_metadata)
+                self._apply_steering(run_id, step, emit)
                 emit(
                     EventKind.MODEL_CALL_STARTED,
                     {"step": step, "message_count": len(self._session.messages)},
@@ -302,8 +335,27 @@ class AgentCore:
                 emit=emit,
                 context_metadata=context_metadata,
             )
+        finally:
+            with self._active_lock:
+                self._active_control = None
+                self._steering_open = False
+            self._session.release_run()
+
+    def _apply_steering(self, run_id: str, step: int, emit) -> None:
+        while True:
+            try:
+                message = self._steering.get_nowait()
+            except queue.Empty:
+                return
+            self._session.append({"role": "user", "content": message})
+            emit(
+                EventKind.STEERING_MESSAGE_ACCEPTED,
+                {"step": step, "content": message, "run_id": run_id},
+            )
 
     def _finish(self, result: RunResult, trace: list[AgentEvent]) -> RunResult:
+        with self._active_lock:
+            self._steering_open = False
         return RunResult(
             result.final_response,
             result.stop_reason,

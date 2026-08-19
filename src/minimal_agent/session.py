@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from threading import Lock
 
 from minimal_agent.protocol import ChatMessage
 
@@ -11,6 +12,7 @@ class AgentSession:
     ) -> None:
         self._messages = list(messages)
         self._system_prompt = system_prompt
+        self._run_lock = Lock()
 
     @property
     def system_prompt(self) -> str | None:
@@ -25,3 +27,9 @@ class AgentSession:
 
     def clear(self) -> None:
         self._messages.clear()
+
+    def try_acquire_run(self) -> bool:
+        return self._run_lock.acquire(blocking=False)
+
+    def release_run(self) -> None:
+        self._run_lock.release()
