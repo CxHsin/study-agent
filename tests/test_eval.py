@@ -1,4 +1,5 @@
 import json
+import threading
 from collections.abc import Sequence
 
 from minimal_agent.eval import (
@@ -19,6 +20,29 @@ class ScriptedModel:
 
     def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
         return next(self.responses)
+
+
+class BlockingSteeringModel:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            self.started.set()
+            assert self.release.wait(timeout=5)
+            return ModelResponse(tool_calls=(ToolCall("id", "read", '{"path":"notes"}'),))
+        assert any(
+            (
+                message.get("role") == "user" and message.get("content") == "add detail"
+                if isinstance(message, dict)
+                else message.role == "user" and message.content == "add detail"
+            )
+            for message in messages
+        )
+        return ModelResponse(content="ok")
 
 
 def read_tools() -> ToolRegistry:
@@ -106,6 +130,37 @@ def test_successful_eval_artifact_serializes_trace_data(tmp_path) -> None:
     report.to_jsonl(artifact)
 
     assert '"case_id": "ok"' in artifact.read_text(encoding="utf-8")
+
+
+def test_eval_case_can_drive_steering_messages() -> None:
+    model = BlockingSteeringModel()
+    case = EvalCase.from_mapping(
+        {
+            "case_id": "steer",
+            "prompt": "hi",
+            "steering_messages": ["add detail"],
+            "expectation": {
+                "steering_count": 1,
+                "allowed_tools": ["read"],
+                "tool_trace": [{"name": "read", "arguments": {"path": "notes"}}],
+            },
+        }
+    )
+    report_holder = []
+
+    def run() -> None:
+        report_holder.append(EvalRunner(lambda _: model, lambda _: read_tools()).run([case]))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert model.started.wait(timeout=5)
+    model.release.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+    report = report_holder[0]
+
+    assert report.status == "passed"
+    assert report.cases[0].hard_rules[-1].name == "steering_count"
 
 
 def test_provider_exception_is_inconclusive_and_artifact_is_redacted(tmp_path) -> None:
