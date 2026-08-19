@@ -22,7 +22,14 @@ class ReadThenAnswer:
 
 def test_core_runs_tool_loop_and_publishes_ordered_events() -> None:
     registry = ToolRegistry(
-        [ToolDefinition("read", "Read a value", {"type": "object"}, lambda call: '{"ok":true}')]
+        [
+            ToolDefinition(
+                "read",
+                "Read a value",
+                {"type": "object", "additionalProperties": False},
+                lambda args: {"ok": True},
+            )
+        ]
     )
     core = AgentCore(ReadThenAnswer(), registry)
     events = []
@@ -50,7 +57,8 @@ def test_core_runs_tool_loop_and_publishes_ordered_events() -> None:
 def test_registry_turns_unknown_tool_into_structured_result() -> None:
     result = ToolRegistry().execute(ToolCall("call-1", "missing", "{}"))
 
-    assert json.loads(result)["error"]["code"] == "UNKNOWN_TOOL"
+    assert result.error is not None
+    assert result.error.code == "UNKNOWN_TOOL"
 
 
 def test_core_reads_a_real_workspace_file(tmp_path) -> None:
@@ -89,7 +97,15 @@ def test_max_steps_executes_last_tool_call() -> None:
     registry = ToolRegistry(
         [
             ToolDefinition(
-                "read", "Read", {"type": "object"}, lambda call: calls.append(call) or '{"ok":true}'
+                "read",
+                "Read",
+                {
+                    "type": "object",
+                    "properties": {"step": {"type": "integer"}},
+                    "required": ["step"],
+                    "additionalProperties": False,
+                },
+                lambda args: calls.append(args) or {"ok": True},
             )
         ]
     )
@@ -115,7 +131,16 @@ def test_repeated_tool_call_is_reported_then_observed() -> None:
 
     result = AgentCore(
         RepeatsThenAnswers(),
-        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+        ToolRegistry(
+            [
+                ToolDefinition(
+                    "read",
+                    "Read",
+                    {"type": "object", "additionalProperties": False},
+                    lambda args: {"ok": True},
+                )
+            ]
+        ),
     ).prompt("go")
 
     assert result.stop_reason is StopReason.FINAL
@@ -129,7 +154,16 @@ def test_repeated_tool_call_stops_on_second_observation() -> None:
 
     result = AgentCore(
         AlwaysRepeats(),
-        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+        ToolRegistry(
+            [
+                ToolDefinition(
+                    "read",
+                    "Read",
+                    {"type": "object", "additionalProperties": False},
+                    lambda args: {"ok": True},
+                )
+            ]
+        ),
     ).prompt("go")
 
     assert result.stop_reason is StopReason.REPEATED_TOOL_CALL
@@ -167,7 +201,16 @@ def test_model_error_becomes_structured_run_error() -> None:
 def test_run_result_contains_complete_trace_snapshot() -> None:
     result = AgentCore(
         ReadThenAnswer(),
-        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+        ToolRegistry(
+            [
+                ToolDefinition(
+                    "read",
+                    "Read",
+                    {"type": "object", "additionalProperties": False},
+                    lambda args: {"ok": True},
+                )
+            ]
+        ),
     ).prompt("read it")
 
     assert result.events[0].kind is EventKind.RUN_STARTED
@@ -195,7 +238,16 @@ def test_listener_failure_is_isolated_and_recorded() -> None:
 
     core = AgentCore(
         ReadThenAnswer(),
-        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+        ToolRegistry(
+            [
+                ToolDefinition(
+                    "read",
+                    "Read",
+                    {"type": "object", "additionalProperties": False},
+                    lambda args: {"ok": True},
+                )
+            ]
+        ),
     )
     core.subscribe(broken_listener)
     core.subscribe(healthy_listener)
@@ -209,11 +261,95 @@ def test_listener_failure_is_isolated_and_recorded() -> None:
 def test_tool_result_trace_includes_result_and_success() -> None:
     result = AgentCore(
         ReadThenAnswer(),
-        ToolRegistry([ToolDefinition("read", "Read", {}, lambda call: '{"ok":true}')]),
+        ToolRegistry(
+            [
+                ToolDefinition(
+                    "read",
+                    "Read",
+                    {"type": "object", "additionalProperties": False},
+                    lambda args: {"ok": True},
+                )
+            ]
+        ),
     ).prompt("read it")
 
     tool_event = next(
         event for event in result.events if event.kind is EventKind.TOOL_RESULT_PRODUCED
     )
     assert tool_event.data["success"] is True
-    assert tool_event.data["result"] == '{"ok":true}'
+    assert json.loads(str(tool_event.data["result"]))["data"] == {"ok": True}
+
+
+def test_registry_validates_arguments_before_execution() -> None:
+    called = False
+
+    def execute(arguments):
+        nonlocal called
+        called = True
+        return {"value": arguments["value"]}
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                "echo",
+                "Echo",
+                {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+                execute,
+            )
+        ]
+    )
+    result = registry.execute(ToolCall("call", "echo", '{"value": 1}'))
+
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "INVALID_ARGUMENTS"
+    assert called is False
+
+
+def test_confirmation_and_authorization_happen_before_execution() -> None:
+    called = False
+
+    class Deny:
+        def authorize(self, context) -> bool:
+            return False
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                "write",
+                "Write",
+                {"type": "object", "additionalProperties": False},
+                lambda arguments: called,
+                requires_confirmation=True,
+            )
+        ],
+        authorizer=Deny(),
+    )
+    result = registry.execute(ToolCall("call", "write", "{}"))
+
+    assert result.error is not None
+    assert result.error.code == "PERMISSION_DENIED"
+    assert called is False
+
+
+def test_tool_errors_and_result_size_are_structured() -> None:
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                "tiny",
+                "Tiny",
+                {"type": "object", "additionalProperties": False},
+                lambda arguments: "0123456789",
+                max_result_bytes=4,
+            )
+        ]
+    )
+    result = registry.execute(ToolCall("call", "tiny", "{}"))
+
+    assert result.error is not None
+    assert result.error.code == "TOOL_RESULT_TOO_LARGE"

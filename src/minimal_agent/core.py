@@ -8,7 +8,7 @@ from uuid import uuid4
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
 from minimal_agent.protocol import ModelAdapter, ModelError, ToolCall
 from minimal_agent.session import AgentSession
-from minimal_agent.tools import ToolRegistry
+from minimal_agent.tools import ToolError, ToolRegistry, ToolResult
 
 
 class StopReason(StrEnum):
@@ -174,30 +174,31 @@ class AgentCore:
                         return self._result(run_id, stop, step, trace, emit)
                     fingerprint = _fingerprint(tool_call)
                     if fingerprint == last_fingerprint:
-                        result = json.dumps(
-                            {
-                                "ok": False,
-                                "error": {
-                                    "code": "REPEATED_TOOL_CALL",
-                                    "message": "Repeated tool call blocked.",
-                                },
-                            }
+                        result = ToolResult(
+                            tool_call.id,
+                            tool_call.name,
+                            False,
+                            error=ToolError("REPEATED_TOOL_CALL", "Repeated tool call blocked."),
                         )
                         self._session.append(
-                            {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": result.to_json(),
+                            }
                         )
-                        emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(tool_call, result))
+                        emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(result))
                         pending_repeat = fingerprint
                         last_fingerprint = fingerprint
                         continue
                     pending_repeat = None
                     last_fingerprint = fingerprint
                     emit(EventKind.TOOL_CALL_REQUESTED, _tool_data(tool_call))
-                    result = self._tools.execute(tool_call)
+                    result = self._tools.execute(tool_call, run_id=run_id, user_input=user_input)
                     self._session.append(
-                        {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+                        {"role": "tool", "tool_call_id": tool_call.id, "content": result.to_json()}
                     )
-                    emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(tool_call, result))
+                    emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(result))
                     stop = _control_stop(control)
                     if stop:
                         return self._result(run_id, stop, step, trace, emit)
@@ -293,19 +294,13 @@ def _tool_data(tool_call: ToolCall) -> dict[str, object]:
     return {"tool_call_id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments}
 
 
-def _tool_result_data(tool_call: ToolCall, result: str) -> dict[str, object]:
-    success: bool | None = None
-    try:
-        parsed = json.loads(result)
-        if isinstance(parsed, dict) and isinstance(parsed.get("ok"), bool):
-            success = parsed["ok"]
-    except json.JSONDecodeError:
-        pass
+def _tool_result_data(result: ToolResult) -> dict[str, object]:
     return {
-        "tool_call_id": tool_call.id,
-        "name": tool_call.name,
-        "result": result,
-        "success": success,
+        "tool_call_id": result.tool_call_id,
+        "name": result.tool_name,
+        "result": result.to_json(),
+        "success": result.ok,
+        "retryable": result.retryable,
     }
 
 

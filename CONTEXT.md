@@ -79,3 +79,19 @@ _Avoid_: Conversation message, debug print
 **Event Listener**:
 An external callback that receives Agent Events during a run for real-time observation without owning the Trace.
 _Avoid_: Event Store, Trace
+
+**Tool Result**:
+The provider-independent, structured outcome of one Tool Call, containing success data or a stable error classification.
+_Avoid_: JSON error string, exception
+
+**Tool Error**:
+A typed failure raised by a Local Tool to describe a domain-level execution problem and whether it is retryable.
+_Avoid_: Core Error, model error
+
+**Tool Authorizer**:
+The application policy boundary that decides whether a validated Tool Call is allowed to execute.
+_Avoid_: Tool Choice, Prompt Instruction
+
+**Confirmation Policy**:
+The application callback that decides whether a Tool Call requiring human approval may execute.
+_Avoid_: Model consent, authorization
