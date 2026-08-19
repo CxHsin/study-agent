@@ -9,11 +9,15 @@ class AgentSession:
     """In-memory conversation context used by AgentCore."""
 
     def __init__(
-        self, messages: Iterable[ChatMessage] = (), *, system_prompt: str | None = None
+        self,
+        messages: Iterable[ChatMessage] = (),
+        *,
+        system_prompt: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         self._messages = list(messages)
         self._system_prompt = system_prompt
-        self.session_id = str(uuid4())
+        self.session_id = session_id or str(uuid4())
         self._run_lock = Lock()
 
     @property

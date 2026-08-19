@@ -53,3 +53,14 @@ def test_recovery_requires_idempotency_and_links_continuation(tmp_path) -> None:
 
     assert repository.run_status("child-safe") == "running"
     assert repository.run_status("child-resolved") == "running"
+
+
+def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "restore.sqlite")
+    repository.save_session("session", "system", [{"role": "user", "content": "hello"}])
+    repository.start_run("run", "session")
+    repository.record_tool("run", "call", "write", '{"password":"secret"}', "started")
+
+    assert repository.load_session("session") == ("system", ({"role": "user", "content": "hello"},))
+    repository.recover()
+    assert repository.run_status("run") == "needs_resolution"

@@ -138,6 +138,32 @@ class SQLiteRepository:
                 ),
             )
 
+    def load_session(
+        self, session_id: str
+    ) -> tuple[str | None, tuple[dict[str, object], ...]] | None:
+        row = self._connection.execute(
+            "SELECT system_prompt, messages_json FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        system_prompt = row[0]
+        if isinstance(system_prompt, str):
+            try:
+                system_prompt = json.loads(system_prompt)
+            except json.JSONDecodeError:
+                pass
+        messages = json.loads(row[1])
+        return system_prompt, tuple(messages)
+
+    def recover(self) -> tuple[UnresolvedTool, ...]:
+        unresolved = self.unresolved_tools()
+        with self._connection:
+            self._connection.executemany(
+                "UPDATE runs SET status='needs_resolution' WHERE run_id=? AND status='running'",
+                [(item.run_id,) for item in unresolved],
+            )
+        return unresolved
+
     def start_run(self, run_id: str, session_id: str, parent_run_id: str | None = None) -> None:
         with self._connection:
             self._connection.execute(

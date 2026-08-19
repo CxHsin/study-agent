@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from minimal_agent.core import AgentCore
 from minimal_agent.deepseek import DeepSeekAdapter
 from minimal_agent.events import AgentEvent
+from minimal_agent.persistence import SQLiteRepository
 from minimal_agent.workspace_tools import WorkspaceTools
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +66,9 @@ def create_core() -> AgentCore:
     workspace.mkdir(exist_ok=True)
     tools = WorkspaceTools(workspace).registry()
     model = DeepSeekAdapter(api_key=api_key, tool_definitions=tools)
-    return AgentCore(model=model, tools=tools)
+    repository = SQLiteRepository(PROJECT_ROOT / ".minimal-agent" / "agent.sqlite")
+    repository.recover()
+    return AgentCore(model=model, tools=tools, repository=repository)
 
 
 def _display_last_trace(events: list[AgentEvent], output_fn: Callable[[str], None]) -> None:
