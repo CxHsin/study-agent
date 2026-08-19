@@ -10,6 +10,25 @@ class ModelError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ProviderCapabilities:
+    streaming: bool = False
+    tool_calls: bool = True
+    cancellation: bool = False
+    usage: bool = False
+    prompt_cache: bool = False
+
+
+@dataclass(frozen=True)
+class ModelUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+    estimated: bool = False
+    latency_ms: float | None = None
+    cost: float | None = None
+
+
+@dataclass(frozen=True)
 class ToolCall:
     id: str
     name: str
@@ -20,6 +39,8 @@ class ToolCall:
 class ModelResponse:
     content: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    usage: ModelUsage | None = None
+    provider_cache_hit: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -31,9 +52,13 @@ class ModelStreamChunk:
     tool_name: str | None = None
     arguments_delta: str = ""
     done: bool = False
+    usage: ModelUsage | None = None
+    provider_cache_hit: bool | None = None
 
 
 class ModelAdapter(Protocol):
     def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse: ...
 
     def stream(self, messages: Sequence[ChatMessage]) -> Iterable[ModelStreamChunk]: ...
+
+    def capabilities(self) -> ProviderCapabilities: ...

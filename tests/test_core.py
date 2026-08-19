@@ -81,6 +81,19 @@ def test_stream_yields_incremental_content_and_preserves_terminal_order() -> Non
     assert events[-1].data["content"] == "hello"
 
 
+def test_completed_stream_does_not_cancel_caller_control() -> None:
+    class FinalStreamingModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            raise AssertionError("streaming model should use stream")
+
+        def stream(self, messages: Sequence[ChatMessage]):
+            yield ModelStreamChunk(content_delta="done", done=True)
+
+    control = RunControl()
+    assert list(AgentCore(FinalStreamingModel()).stream("say", control))[-1].kind is EventKind.FINAL_RESPONSE
+    assert control.stop_reason is None
+
+
 def test_stream_buffers_tool_call_fragments_before_execution() -> None:
     class StreamingToolModel:
         def __init__(self) -> None:

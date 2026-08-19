@@ -100,6 +100,16 @@ def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
     )
 
 
+def test_deepseek_declares_provider_capabilities(tmp_path) -> None:
+    adapter = DeepSeekAdapter(api_key="test-key", tool_definitions=WorkspaceTools(tmp_path).definitions(), client=object())
+
+    capabilities = adapter.capabilities()
+
+    assert capabilities.tool_calls is True
+    assert capabilities.streaming is False
+    assert capabilities.prompt_cache is False
+
+
 def test_model_errors_are_exposed_as_model_errors(tmp_path) -> None:
     tools = WorkspaceTools(tmp_path)
     adapter = DeepSeekAdapter(

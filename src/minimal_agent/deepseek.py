@@ -3,7 +3,14 @@ from typing import Any, cast
 
 from openai import OpenAI, OpenAIError
 
-from minimal_agent.protocol import ChatMessage, ModelError, ModelResponse, ToolCall
+from minimal_agent.protocol import (
+    ChatMessage,
+    ModelError,
+    ModelResponse,
+    ModelUsage,
+    ProviderCapabilities,
+    ToolCall,
+)
 from minimal_agent.tools import ToolRegistry
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
@@ -29,6 +36,15 @@ class DeepSeekAdapter:
             max_retries=2,
         )
 
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            streaming=False,
+            tool_calls=True,
+            cancellation=False,
+            usage=True,
+            prompt_cache=False,
+        )
+
     def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
         try:
             completion = self._client.chat.completions.create(
@@ -49,7 +65,8 @@ class DeepSeekAdapter:
             )
             if message.content is None and not tool_calls:
                 raise ModelError("DeepSeek returned neither text nor Tool Calls.")
-            return ModelResponse(content=message.content, tool_calls=tool_calls)
+            usage = _usage_from_completion(completion)
+            return ModelResponse(content=message.content, tool_calls=tool_calls, usage=usage)
         except ModelError:
             raise
         except OpenAIError as error:
@@ -80,3 +97,19 @@ def _to_sdk_message(message: ChatMessage) -> dict[str, object]:
             for tool_call in tool_calls
         ]
     return sdk_message
+
+
+def _usage_from_completion(completion: Any) -> ModelUsage | None:
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return None
+    return ModelUsage(
+        input_tokens=_int_or_none(getattr(usage, "prompt_tokens", None)),
+        output_tokens=_int_or_none(getattr(usage, "completion_tokens", None)),
+        cached_tokens=_int_or_none(getattr(usage, "prompt_cache_hit_tokens", None)),
+        estimated=False,
+    )
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None

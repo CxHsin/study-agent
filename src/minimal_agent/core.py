@@ -120,6 +120,7 @@ class AgentCore:
         control = control or RunControl()
         events: queue.Queue[AgentEvent | object] = queue.Queue()
         finished = object()
+        completed = False
 
         def run() -> None:
             try:
@@ -132,10 +133,11 @@ class AgentCore:
             while True:
                 event = events.get()
                 if event is finished:
+                    completed = True
                     return
                 yield event  # type narrowing is not available for the sentinel union
         finally:
-            if control is not None:
+            if not completed:
                 control.cancel()
 
     def _execute_prompt(
@@ -232,6 +234,8 @@ class AgentCore:
                         "step": step,
                         "content": response.content,
                         "tool_calls": tuple(_tool_data(call) for call in response.tool_calls),
+                        "usage": response.usage,
+                        "provider_cache_hit": response.provider_cache_hit,
                     },
                 )
                 stop = _control_stop(control)
@@ -339,7 +343,15 @@ class AgentCore:
             with self._active_lock:
                 self._active_control = None
                 self._steering_open = False
+            self._discard_pending_steering()
             self._session.release_run()
+
+    def _discard_pending_steering(self) -> None:
+        while True:
+            try:
+                self._steering.get_nowait()
+            except queue.Empty:
+                return
 
     def _apply_steering(self, run_id: str, step: int, emit) -> None:
         while True:
@@ -480,6 +492,9 @@ def _model_response(
     emit: Callable[[EventKind, dict[str, object]], None],
     step: int,
 ) -> ModelResponse:
+    capabilities = getattr(model, "capabilities", None)
+    if callable(capabilities) and not capabilities().streaming:
+        return model.complete(messages)
     stream = getattr(model, "stream", None)
     if not callable(stream):
         return model.complete(messages)
@@ -487,9 +502,15 @@ def _model_response(
     content_parts: list[str] = []
     calls: dict[str, dict[str, str]] = {}
     order: list[str] = []
+    usage = None
+    provider_cache_hit = None
     for chunk in stream(messages):
         if not isinstance(chunk, ModelStreamChunk):
             raise ModelError("Provider returned an invalid stream chunk.")
+        if chunk.usage is not None:
+            usage = chunk.usage
+        if chunk.provider_cache_hit is not None:
+            provider_cache_hit = chunk.provider_cache_hit
         if chunk.content_delta:
             content_parts.append(chunk.content_delta)
             emit(
@@ -520,4 +541,9 @@ def _model_response(
         ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"])
         for call_id in order
     )
-    return ModelResponse("".join(content_parts) or None, tool_calls)
+    return ModelResponse(
+        "".join(content_parts) or None,
+        tool_calls,
+        usage=usage,
+        provider_cache_hit=provider_cache_hit,
+    )
