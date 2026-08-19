@@ -55,6 +55,12 @@ class Redactor:
         if isinstance(value, (list, tuple)):
             return [self.redact(item) for item in value]
         if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except json.JSONDecodeError:
+                return self._secret.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
+            if decoded != value:
+                return json.dumps(self.redact(decoded), ensure_ascii=False, separators=(",", ":"))
             return self._secret.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
         return value
 
@@ -261,6 +267,7 @@ class SQLiteRepository:
 
     def create_continuation(self, parent_run_id: str, run_id: str, session_id: str) -> None:
         self.start_run(run_id, session_id, parent_run_id=parent_run_id)
+        self.append_event(run_id, 1, "continuation_started", {"parent_run_id": parent_run_id})
 
     def retry_tool(
         self, run_id: str, call_id: str, continuation_run_id: str, session_id: str
@@ -283,6 +290,12 @@ class SQLiteRepository:
                 "UPDATE tool_executions SET status='retry_scheduled' WHERE run_id=? AND call_id=?",
                 (run_id, call_id),
             )
+        self.append_event(
+            continuation_run_id,
+            2,
+            "tool_retry_scheduled",
+            {"parent_run_id": run_id, "call_id": call_id},
+        )
         return tool
 
     def resolve_tool(
@@ -301,6 +314,13 @@ class SQLiteRepository:
             self._connection.execute(
                 "UPDATE tool_executions SET status='completed', result_json=? WHERE run_id=? AND call_id=?",
                 (_json(result, self.redactor), run_id, call_id),
+            )
+        if continuation_run_id is not None:
+            self.append_event(
+                continuation_run_id,
+                2,
+                "tool_resolved",
+                {"parent_run_id": run_id, "call_id": call_id, "result": result},
             )
 
     def close(self) -> None:

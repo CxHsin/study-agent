@@ -55,6 +55,16 @@ def test_recovery_requires_idempotency_and_links_continuation(tmp_path) -> None:
 
     assert repository.run_status("child-safe") == "running"
     assert repository.run_status("child-resolved") == "running"
+    assert repository.event_payloads("child-resolved")[1]["call_id"] == "unsafe"
+
+
+def test_redacts_secrets_inside_json_strings(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "secrets.sqlite")
+    repository.save_session("s", None, [{"role": "user", "content": '{"password":"supersecret"}'}])
+
+    loaded = repository.load_session("s")
+
+    assert "supersecret" not in str(loaded)
 
 
 def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:
