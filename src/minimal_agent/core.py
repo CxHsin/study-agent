@@ -117,8 +117,18 @@ class AgentCore:
         if self._repository is None:
             raise RuntimeError("A Repository is required to continue a persisted Run.")
         lookup = getattr(self._repository, "continuation_session", None)
-        if not callable(lookup) or lookup(continuation_run_id) is None:
+        continuation = lookup(continuation_run_id) if callable(lookup) else None
+        if continuation is None:
             raise KeyError(f"Unknown continuation Run: {continuation_run_id}")
+        session_id, system_prompt, messages = continuation
+        if self._session.session_id != session_id:
+            self._session = AgentSession(
+                messages,
+                system_prompt=system_prompt,
+                session_id=session_id,
+            )
+        else:
+            self._session.restore(messages, system_prompt=system_prompt)
         return self.prompt(user_input, control)
 
     def steer(self, message: str) -> bool:

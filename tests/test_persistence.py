@@ -80,8 +80,11 @@ def test_tool_lifecycle_is_committed_as_one_transaction(tmp_path) -> None:
 
 
 def test_core_continues_a_persisted_continuation_run(tmp_path) -> None:
+    seen: list[tuple[dict[str, object], ...]] = []
+
     class FinalModel:
         def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            seen.append(tuple(messages))
             return ModelResponse(content="continued")
 
     repository = SQLiteRepository(tmp_path / "continuation.sqlite")
@@ -93,6 +96,7 @@ def test_core_continues_a_persisted_continuation_run(tmp_path) -> None:
     result = core.continue_run("child", "continue")
 
     assert result.final_response == "continued"
+    assert seen[0][0]["content"] == "old"
 
 
 def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:

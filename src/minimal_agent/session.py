@@ -34,6 +34,11 @@ class AgentSession:
     def clear(self) -> None:
         self._messages.clear()
 
+    def restore(self, messages: Iterable[ChatMessage], *, system_prompt: str | None = None) -> None:
+        """Replace in-memory history with a repository snapshot."""
+        self._messages = list(messages)
+        self._system_prompt = system_prompt
+
     def try_acquire_run(self) -> bool:
         return self._run_lock.acquire(blocking=False)
 
