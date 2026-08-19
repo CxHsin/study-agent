@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Steering、Follow-up 与 Session 串行控制; 03 — Provider Capability 与适配器契约
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Repository writes append-only events and current projections with explicit schema/format versions.
 - [ ] Requested, started, and completed Tool boundaries are persisted transactionally with Run state.

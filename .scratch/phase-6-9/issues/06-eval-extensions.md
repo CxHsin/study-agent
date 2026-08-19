@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Streaming Event 基础与兼容同步 API; 02 — Steering、Follow-up 与 Session 串行控制; 03 — Provider Capability 与适配器契约; 04 — SQLite Repository 与恢复安全边界; 05 — Prompt Cache Checkpoint 与 Usage Record
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Existing Eval Case loading, execution, trajectory checks, and artifact redaction remain compatible.
 - [ ] Optional assertions cover event order, Steering/Follow-up, capabilities, recovery, usage, and cache sources.

@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A stream consumer can observe ordered lifecycle and incremental model events for a Run.
 - [ ] `prompt()` aggregates the same stream into the existing RunResult contract.

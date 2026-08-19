@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 — Provider Capability 与适配器契约; 04 — SQLite Repository 与恢复安全边界
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Usage records distinguish Provider-reported, estimated, and unknown values.
 - [ ] Local checkpoints use normalized prefix identity and record relevant invalidation inputs.

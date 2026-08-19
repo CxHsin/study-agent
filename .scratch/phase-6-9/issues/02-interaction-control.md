@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Streaming Event 基础与兼容同步 API
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Steering is ordered, persisted in Session history, and applied at the next model boundary.
 - [ ] Steering is queued while a Tool runs and is rejected after termination.

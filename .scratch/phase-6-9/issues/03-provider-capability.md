@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Streaming Event 基础与兼容同步 API
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Providers expose explicit capability metadata without changing the existing completion contract.
 - [ ] Streaming and non-streaming responses normalize to the Core event protocol.
