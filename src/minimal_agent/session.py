@@ -1,5 +1,6 @@
 from collections.abc import Iterable
 from threading import Lock
+from uuid import uuid4
 
 from minimal_agent.protocol import ChatMessage
 
@@ -12,6 +13,7 @@ class AgentSession:
     ) -> None:
         self._messages = list(messages)
         self._system_prompt = system_prompt
+        self.session_id = str(uuid4())
         self._run_lock = Lock()
 
     @property

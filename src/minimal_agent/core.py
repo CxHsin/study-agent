@@ -76,6 +76,7 @@ class AgentCore:
         session: AgentSession | None = None,
         max_steps: int = 8,
         context_builder: ContextBuilder | None = None,
+        repository: object | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive.")
@@ -84,6 +85,7 @@ class AgentCore:
         self._session = session or AgentSession()
         self._max_steps = max_steps
         self._context_builder = context_builder or ContextBuilder(summarizer=ModelSummarizer(model))
+        self._repository = repository
         self._listeners: list[AgentEventListener] = []
         self._sequence = 0
         self._active_lock = threading.Lock()
@@ -160,6 +162,13 @@ class AgentCore:
         with self._active_lock:
             self._active_control = control
             self._steering_open = True
+        self._repository_call(
+            "save_session",
+            self._session.session_id,
+            self._session.system_prompt,
+            self._session.messages,
+        )
+        self._repository_call("start_run", run_id, self._session.session_id)
         self._sequence = 0
         trace: list[AgentEvent] = []
         started_at = time.perf_counter()
@@ -311,8 +320,39 @@ class AgentCore:
                         continue
                     pending_repeat = None
                     last_fingerprint = fingerprint
+                    definition = self._tools.get(tool_call.name)
+                    self._repository_call(
+                        "record_tool",
+                        run_id,
+                        tool_call.id,
+                        tool_call.name,
+                        tool_call.arguments,
+                        "requested",
+                        None,
+                        idempotent=definition.idempotent if definition else False,
+                    )
                     emit(EventKind.TOOL_CALL_REQUESTED, _tool_data(tool_call))
+                    self._repository_call(
+                        "record_tool",
+                        run_id,
+                        tool_call.id,
+                        tool_call.name,
+                        tool_call.arguments,
+                        "started",
+                        None,
+                        idempotent=definition.idempotent if definition else False,
+                    )
                     result = self._tools.execute(tool_call, run_id=run_id, user_input=user_input)
+                    self._repository_call(
+                        "record_tool",
+                        run_id,
+                        tool_call.id,
+                        tool_call.name,
+                        tool_call.arguments,
+                        "completed",
+                        result.to_json(),
+                        idempotent=definition.idempotent if definition else False,
+                    )
                     self._session.append(
                         {"role": "tool", "tool_call_id": tool_call.id, "content": result.to_json()}
                     )
@@ -353,6 +393,13 @@ class AgentCore:
             except queue.Empty:
                 return
 
+    def _repository_call(self, method: str, *args, **kwargs) -> None:
+        if self._repository is None:
+            return
+        callback = getattr(self._repository, method, None)
+        if callback is not None:
+            callback(*args, **kwargs)
+
     def _apply_steering(self, run_id: str, step: int, emit) -> None:
         while True:
             try:
@@ -368,6 +415,7 @@ class AgentCore:
     def _finish(self, result: RunResult, trace: list[AgentEvent]) -> RunResult:
         with self._active_lock:
             self._steering_open = False
+        self._repository_call("finish_run", result.run_id, result.stop_reason.value, result.steps_used)
         return RunResult(
             result.final_response,
             result.stop_reason,
@@ -438,6 +486,7 @@ class AgentCore:
             (time.perf_counter() - started_at) * 1000,
         )
         trace.append(event)
+        self._repository_call("append_event", run_id, event.sequence, event.kind.value, event.data)
         if event_sink is not None:
             event_sink(event)
         for index, listener in enumerate(self._listeners):
