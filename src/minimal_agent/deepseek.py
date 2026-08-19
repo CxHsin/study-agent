@@ -18,6 +18,8 @@ DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
 class DeepSeekAdapter:
+    model_name = DEEPSEEK_MODEL
+
     def __init__(
         self,
         api_key: str,

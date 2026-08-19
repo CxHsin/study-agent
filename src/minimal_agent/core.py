@@ -241,7 +241,7 @@ class AgentCore:
                         context.messages,
                         session_id=self._session.session_id,
                         message_index=len(context.messages),
-                        model=type(self._model).__name__,
+                        model=getattr(self._model, "model_name", type(self._model).__name__),
                         tool_schema=self._tools.definitions(),
                         system_prompt=self._session.system_prompt,
                         context_builder=self._context_builder.estimator.name,
@@ -448,6 +448,12 @@ class AgentCore:
 
     def _finish(self, result: RunResult, trace: list[AgentEvent]) -> RunResult:
         self._close_steering()
+        self._repository_call(
+            "save_session",
+            self._session.session_id,
+            self._session.system_prompt,
+            self._session.messages,
+        )
         self._repository_call("finish_run", result.run_id, result.stop_reason.value, result.steps_used)
         return RunResult(
             result.final_response,
