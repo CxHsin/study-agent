@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from openai import OpenAI, OpenAIError
@@ -86,14 +86,14 @@ def _to_sdk_message(message: ChatMessage) -> dict[str, object]:
         )
         sdk_message.pop("summary_id", None)
     if message.get("role") == "assistant" and "tool_calls" in message:
-        tool_calls = cast(Sequence[ToolCall], message["tool_calls"])
+        tool_calls = cast(Sequence[object], message["tool_calls"])
         sdk_message["tool_calls"] = [
             {
-                "id": tool_call.id,
+                "id": _tool_call_field(tool_call, "id"),
                 "type": "function",
                 "function": {
-                    "name": tool_call.name,
-                    "arguments": tool_call.arguments,
+                    "name": _tool_call_field(tool_call, "name"),
+                    "arguments": _tool_call_field(tool_call, "arguments"),
                 },
             }
             for tool_call in tool_calls
@@ -115,3 +115,9 @@ def _usage_from_completion(completion: Any) -> ModelUsage | None:
 
 def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _tool_call_field(call: object, field: str) -> str:
+    if isinstance(call, Mapping):
+        return str(call.get(field, ""))
+    return str(getattr(call, field, ""))

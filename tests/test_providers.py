@@ -72,3 +72,16 @@ def test_provider_messages_normalize_multi_turn_tool_history() -> None:
     _, anthropic = _to_anthropic_messages([assistant, tool])
     assert anthropic[0]["content"][0]["type"] == "tool_use"
     assert anthropic[1]["content"][0]["type"] == "tool_result"
+
+
+def test_provider_messages_accept_restored_tool_call_mappings() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "c1", "name": "read", "arguments": "{}"}],
+    }
+    tool = {"role": "tool", "tool_call_id": "c1", "content": "done"}
+
+    assert _to_openai_message(assistant)["tool_calls"][0]["id"] == "c1"
+    _, anthropic = _to_anthropic_messages([assistant, tool])
+    assert anthropic[0]["content"][0]["input"] == {}

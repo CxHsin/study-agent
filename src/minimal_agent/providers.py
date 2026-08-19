@@ -1,5 +1,6 @@
 """Optional Provider Adapter implementations using injected SDK clients."""
 
+from collections.abc import Mapping
 from typing import Any, cast
 
 from minimal_agent.deepseek import _usage_from_completion
@@ -138,12 +139,15 @@ def _to_openai_message(message: ChatMessage) -> dict[str, object]:
         converted["role"] = "user"
         converted.pop("summary_id", None)
     if converted.get("role") == "assistant" and "tool_calls" in converted:
-        calls = cast(tuple[ToolCall, ...], converted["tool_calls"])
+        calls = converted["tool_calls"]
         converted["tool_calls"] = [
             {
-                "id": call.id,
+                "id": _tool_call_field(call, "id"),
                 "type": "function",
-                "function": {"name": call.name, "arguments": call.arguments},
+                "function": {
+                    "name": _tool_call_field(call, "name"),
+                    "arguments": _tool_call_field(call, "arguments"),
+                },
             }
             for call in calls
         ]
@@ -178,9 +182,9 @@ def _to_anthropic_messages(
             blocks.extend(
                 {
                     "type": "tool_use",
-                    "id": call.id,
-                    "name": call.name,
-                    "input": _decoded_arguments(call.arguments),
+                    "id": _tool_call_field(call, "id"),
+                    "name": _tool_call_field(call, "name"),
+                    "input": _decoded_arguments(_tool_call_field(call, "arguments")),
                 }
                 for call in cast(tuple[ToolCall, ...], message["tool_calls"])
             )
@@ -216,3 +220,9 @@ def _decoded_arguments(value: str) -> object:
         return json.loads(value)
     except json.JSONDecodeError:
         return {}
+
+
+def _tool_call_field(call: object, field: str) -> str:
+    if isinstance(call, Mapping):
+        return str(call.get(field, ""))
+    return str(getattr(call, field, ""))
