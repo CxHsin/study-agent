@@ -1,3 +1,4 @@
+import inspect
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
@@ -56,7 +57,7 @@ class ToolExecutionContext:
     arguments: Mapping[str, object]
 
 
-ToolExecutor = Callable[[Mapping[str, object]], object]
+ToolExecutor = Callable[..., object]
 MAX_TOOL_RESULT_BYTES = 64 * 1024
 _TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
@@ -92,15 +93,15 @@ class ToolDefinition:
             if set(properties) != required:
                 raise ValueError("Strict tool schemas must mark every property as required.")
 
-    def provider_definition(self) -> dict[str, object]:
+    def definition(self) -> dict[str, object]:
         return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-                "strict": self.strict,
-            },
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+            "strict": self.strict,
+            "read_only": self.read_only,
+            "idempotent": self.idempotent,
+            "requires_confirmation": self.requires_confirmation,
         }
 
 
@@ -123,7 +124,7 @@ class ToolRegistry:
         self._definitions[definition.name] = definition
 
     def definitions(self) -> tuple[dict[str, object], ...]:
-        return tuple(item.provider_definition() for item in self._definitions.values())
+        return tuple(item.definition() for item in self._definitions.values())
 
     def get(self, name: str) -> ToolDefinition | None:
         return self._definitions.get(name)
@@ -131,7 +132,7 @@ class ToolRegistry:
     def all_read_only(self) -> bool:
         return all(definition.read_only for definition in self._definitions.values())
 
-    def execute(self, tool_call: ToolCall, *, run_id: str = "", user_input: str = "") -> ToolResult:
+    def execute(self, tool_call: ToolCall, *, run_id: str = "", user_input: str = "", control: object | None = None) -> ToolResult:
         definition = self._definitions.get(tool_call.name)
         if definition is None:
             return _failure(tool_call, "UNKNOWN_TOOL", f"Unknown tool: {tool_call.name}")
@@ -159,7 +160,10 @@ class ToolRegistry:
             if not confirmed:
                 return _failure(tool_call, "PERMISSION_DENIED", "Tool operation was not confirmed.")
         try:
-            data = definition.execute(decoded)
+            if control is not None and len(inspect.signature(definition.execute).parameters) >= 2:
+                data = definition.execute(decoded, control)
+            else:
+                data = definition.execute(decoded)
             encoded = json.dumps(data, ensure_ascii=False)
             if len(encoded.encode("utf-8")) > definition.max_result_bytes:
                 return _failure(

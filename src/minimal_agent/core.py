@@ -403,7 +403,9 @@ class AgentCore:
                         tool_call.arguments,
                         idempotent=definition.idempotent if definition else False,
                     )
-                    result = self._tools.execute(tool_call, run_id=run_id, user_input=user_input)
+                    result = self._tools.execute(
+                        tool_call, run_id=run_id, user_input=user_input, control=control
+                    )
                     self._repository_call(
                         "record_tool",
                         run_id,

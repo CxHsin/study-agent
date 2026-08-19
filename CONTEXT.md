@@ -195,3 +195,19 @@ _Avoid_: Silent emulation, Provider error
 **Checkpoint Invalidation**:
 The rule that prevents reuse of a local Prompt Cache Checkpoint when model-facing inputs or the context-building contract have changed.
 _Avoid_: Session clear, cache eviction
+
+**Read File Tool**:
+A fixed Local Tool that returns UTF-8 text from an authorized Agent Workspace path, optionally bounded by inclusive one-based line numbers.
+_Avoid_: File browser, arbitrary file access
+
+**Bash Tool**:
+A fixed Local Tool that runs one shell command in the Agent Workspace and reports structured process output; every call requires explicit confirmation.
+_Avoid_: Shell access, unrestricted command runner
+
+**Tool Confirmation**:
+An explicit approval decision required before a governed Tool Call executes; absence of a confirmation policy is a denial.
+_Avoid_: Model consent, authorization
+
+**Execution Boundary**:
+The set of workspace, path, environment, timeout, output, and cancellation rules governing a Local Tool execution.
+_Avoid_: Full operating-system sandbox

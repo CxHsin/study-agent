@@ -56,8 +56,8 @@ def test_adapter_sends_deepseek_tool_call_request(tmp_path) -> None:
     assert request["extra_body"] == {"thinking": {"type": "disabled"}}
     assert request["tool_choice"] == "auto"
     assert [tool["function"]["name"] for tool in request["tools"]] == [
-        "list_files",
         "read_file",
+        "bash",
     ]
     assistant_message = request["messages"][1]
     assert assistant_message["tool_calls"][0] == {
@@ -77,8 +77,8 @@ def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
                         SimpleNamespace(
                             id="call-1",
                             function=SimpleNamespace(
-                                name="list_files",
-                                arguments='{"path":"."}',
+                                name="read_file",
+                                arguments='{"path":"x"}',
                             ),
                         )
                     ],
@@ -93,10 +93,10 @@ def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
         client=FakeClient(FakeCompletions(response=completion)),
     )
 
-    result = adapter.complete([{"role": "user", "content": "List files"}])
+    result = adapter.complete([{"role": "user", "content": "Read x"}])
 
     assert result.tool_calls == (
-        ToolCall(id="call-1", name="list_files", arguments='{"path":"."}'),
+        ToolCall(id="call-1", name="read_file", arguments='{"path":"x"}'),
     )
 
 

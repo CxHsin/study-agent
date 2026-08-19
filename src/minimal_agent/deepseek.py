@@ -27,9 +27,9 @@ class DeepSeekAdapter:
         client: Any | None = None,
     ) -> None:
         self._tool_definitions = (
-            tool_definitions.definitions()
+            tuple(_to_openai_tool(item) for item in tool_definitions.definitions())
             if isinstance(tool_definitions, ToolRegistry)
-            else tuple(tool_definitions)
+            else tuple(_to_openai_tool(item) for item in tool_definitions)
         )
         self._client = client or OpenAI(
             api_key=api_key,
@@ -121,3 +121,15 @@ def _tool_call_field(call: object, field: str) -> str:
     if isinstance(call, Mapping):
         return str(call.get(field, ""))
     return str(getattr(call, field, ""))
+
+
+def _to_openai_tool(definition: dict[str, object]) -> dict[str, object]:
+    function = definition.get("function", definition)
+    if not isinstance(function, Mapping):
+        function = {}
+    return {"type": "function", "function": {
+        "name": function.get("name", ""),
+        "description": function.get("description", ""),
+        "parameters": function.get("parameters", {"type": "object"}),
+        "strict": function.get("strict", False),
+    }}

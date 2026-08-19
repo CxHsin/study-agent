@@ -26,9 +26,9 @@ class OpenAIAdapter:
     ) -> None:
         self.model_name = model
         self._tools = (
-            tool_definitions.definitions()
+            tuple(_to_openai_tool(item) for item in tool_definitions.definitions())
             if isinstance(tool_definitions, ToolRegistry)
-            else tuple(tool_definitions)
+            else tuple(_to_openai_tool(item) for item in tool_definitions)
         )
         if client is None:
             from openai import OpenAI
@@ -155,12 +155,22 @@ def _to_openai_message(message: ChatMessage) -> dict[str, object]:
 
 
 def _to_anthropic_tool(definition: dict[str, object]) -> dict[str, object]:
-    function = cast(dict[str, object], definition.get("function", {}))
+    function = cast(dict[str, object], definition.get("function", definition))
     return {
         "name": function.get("name", ""),
         "description": function.get("description", ""),
         "input_schema": function.get("parameters", {"type": "object"}),
     }
+
+
+def _to_openai_tool(definition: dict[str, object]) -> dict[str, object]:
+    function = cast(dict[str, object], definition.get("function", definition))
+    return {"type": "function", "function": {
+        "name": function.get("name", ""),
+        "description": function.get("description", ""),
+        "parameters": function.get("parameters", {"type": "object"}),
+        "strict": function.get("strict", False),
+    }}
 
 
 def _to_anthropic_messages(
