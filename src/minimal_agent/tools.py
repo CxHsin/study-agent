@@ -128,6 +128,9 @@ class ToolRegistry:
     def get(self, name: str) -> ToolDefinition | None:
         return self._definitions.get(name)
 
+    def all_read_only(self) -> bool:
+        return all(definition.read_only for definition in self._definitions.values())
+
     def execute(self, tool_call: ToolCall, *, run_id: str = "", user_input: str = "") -> ToolResult:
         definition = self._definitions.get(tool_call.name)
         if definition is None:

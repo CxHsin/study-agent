@@ -115,3 +115,31 @@ _Avoid_: Agent Loop, automatic retry
 **Compression Trigger**:
 The configured utilization ratio at which the Context Builder requests Context Summary generation before the next main model call.
 _Avoid_: Hard provider limit, truncation point
+
+**Eval Case**:
+A versioned description of one Agent Core Run input, controlled model/provider setup, and structured expectations used for regression evaluation.
+_Avoid_: Production request, unit test only
+
+**Eval Artifact**:
+The redacted, versioned record of an Eval Case execution, including automatic results and independent human or judge assessments.
+_Avoid_: Raw provider transcript, secret-bearing log
+
+**Hard Rule**:
+A deterministic evaluation assertion over RunResult or Trace data, such as Stop Reason, allowed tools, normalized arguments, order, count, authorization, or text constraints.
+_Avoid_: LLM Judge, subjective score
+
+**Trajectory Mode**:
+The configured strict or structural comparison policy for Tool Call sequences; it ignores unstable identifiers and timestamps according to the selected policy.
+_Avoid_: Trace equality, final-text score
+
+**Inconclusive Evaluation**:
+An Eval Case outcome where the evidence is insufficient to judge the task, such as an unavailable real Provider; it is distinct from a business failure.
+_Avoid_: Passed, failed
+
+**Eval Run**:
+One bounded execution of a selected Eval Case collection with explicit provider, call, timeout, and budget limits.
+_Avoid_: Agent Run, benchmark score
+
+**Trajectory Comparison**:
+The deterministic comparison of observed Tool Calls against a Case expectation under a selected Trajectory Mode.
+_Avoid_: Text similarity, Judge Result

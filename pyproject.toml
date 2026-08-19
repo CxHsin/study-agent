@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 minimal-agent = "minimal_agent.cli:main"
+minimal-agent-eval = "minimal_agent.eval_cli:main"
 
 [dependency-groups]
 dev = [
