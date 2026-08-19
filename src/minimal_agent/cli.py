@@ -66,9 +66,17 @@ def create_core() -> AgentCore:
     workspace.mkdir(exist_ok=True)
     tools = WorkspaceTools(workspace).registry()
     model = DeepSeekAdapter(api_key=api_key, tool_definitions=tools)
-    repository = SQLiteRepository(PROJECT_ROOT / ".minimal-agent" / "agent.sqlite")
+    storage = PROJECT_ROOT / ".minimal-agent"
+    storage.mkdir(exist_ok=True)
+    repository = SQLiteRepository(storage / "agent.sqlite")
     repository.recover()
-    return AgentCore(model=model, tools=tools, repository=repository)
+    saved = repository.latest_session()
+    session = None
+    if saved is not None:
+        from minimal_agent.session import AgentSession
+
+        session = AgentSession(saved[2], system_prompt=saved[1], session_id=saved[0])
+    return AgentCore(model=model, tools=tools, session=session, repository=repository)
 
 
 def _display_last_trace(events: list[AgentEvent], output_fn: Callable[[str], None]) -> None:

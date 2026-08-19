@@ -155,12 +155,25 @@ class SQLiteRepository:
         messages = json.loads(row[1])
         return system_prompt, tuple(messages)
 
+    def latest_session(self) -> tuple[str, str | None, tuple[dict[str, object], ...]] | None:
+        row = self._connection.execute(
+            "SELECT session_id, system_prompt, messages_json FROM sessions ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        system_prompt = row[1]
+        if isinstance(system_prompt, str):
+            try:
+                system_prompt = json.loads(system_prompt)
+            except json.JSONDecodeError:
+                pass
+        return row[0], system_prompt, tuple(json.loads(row[2]))
+
     def recover(self) -> tuple[UnresolvedTool, ...]:
         unresolved = self.unresolved_tools()
         with self._connection:
-            self._connection.executemany(
-                "UPDATE runs SET status='needs_resolution' WHERE run_id=? AND status='running'",
-                [(item.run_id,) for item in unresolved],
+            self._connection.execute(
+                "UPDATE runs SET status='needs_resolution' WHERE status='running'"
             )
         return unresolved
 
@@ -214,7 +227,17 @@ class SQLiteRepository:
 
     def unresolved_tools(self) -> tuple[UnresolvedTool, ...]:
         rows = self._connection.execute(
-            "SELECT run_id, call_id, name, arguments, idempotent FROM tool_executions WHERE status='started'"
+            """
+            SELECT run_id, call_id, name, arguments, idempotent
+            FROM tool_executions AS current
+            WHERE status='started'
+              AND NOT EXISTS (
+                SELECT 1 FROM tool_executions AS newer
+                WHERE newer.run_id=current.run_id
+                  AND newer.call_id=current.call_id
+                  AND newer.id > current.id
+              )
+            """
         ).fetchall()
         return tuple(UnresolvedTool(*row) for row in rows)
 

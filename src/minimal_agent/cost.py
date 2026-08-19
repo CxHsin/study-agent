@@ -89,7 +89,7 @@ def usage_record(
         else "local"
         if local_cache_hit
         else "provider"
-        if response.provider_cache_hit is not None
+        if response.provider_cache_hit is True
         and (capabilities is None or capabilities.prompt_cache)
         else "unknown",
     )

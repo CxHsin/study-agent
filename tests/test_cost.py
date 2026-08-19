@@ -28,6 +28,13 @@ def test_usage_distinguishes_provider_and_estimated_values() -> None:
 
     assert reported.source == "provider"
     assert reported.cache_hit_source == "provider"
+    assert (
+        usage_record(
+            ModelResponse(content="ok", provider_cache_hit=False),
+            capabilities=ProviderCapabilities(prompt_cache=True),
+        ).cache_hit_source
+        == "unknown"
+    )
     assert estimated.source == "estimated"
     assert estimated.input_tokens == 10
     assert priced.cost == 4.5

@@ -184,12 +184,6 @@ class AgentCore:
         with self._active_lock:
             self._active_control = control
             self._steering_open = True
-        self._repository_call(
-            "save_session",
-            self._session.session_id,
-            self._session.system_prompt,
-            self._session.messages,
-        )
         self._repository_call("start_run", run_id, self._session.session_id)
         self._sequence = 0
         trace: list[AgentEvent] = []
@@ -197,6 +191,12 @@ class AgentCore:
         disabled_listeners: set[int] = set()
         context_metadata: list[dict[str, object]] = []
         self._session.append({"role": "user", "content": user_input})
+        self._repository_call(
+            "save_session",
+            self._session.session_id,
+            self._session.system_prompt,
+            self._session.messages,
+        )
         emit = lambda kind, data: self._emit(
             run_id, kind, data, trace, started_at, disabled_listeners, event_sink
         )
@@ -663,6 +663,11 @@ def _model_response(
         raise ModelError("Provider returned an incomplete Tool Call.")
     if not completed:
         raise ModelError("Provider stream ended before completion.")
+    for call_id in order:
+        try:
+            json.loads(calls[call_id]["arguments"])
+        except json.JSONDecodeError as error:
+            raise ModelError("Provider returned malformed Tool Call arguments.") from error
     tool_calls = tuple(
         ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"]) for call_id in order
     )

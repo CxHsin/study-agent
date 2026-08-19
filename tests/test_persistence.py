@@ -13,8 +13,10 @@ def test_sqlite_repository_preserves_events_and_unresolved_tool(tmp_path) -> Non
     repository.start_run("run-1", "session-1")
     repository.append_event("run-1", 1, "run_started", {"authorization": "Bearer secret"})
     repository.record_tool("run-1", "call-1", "write", '{"value":1}', "started", idempotent=False)
+    repository.record_tool("run-1", "call-1", "write", '{"value":1}', "completed", '{"ok":true}')
+    repository.record_tool("run-1", "call-2", "write", '{"value":2}', "started", idempotent=False)
 
-    assert repository.unresolved_tools()[0].call_id == "call-1"
+    assert repository.unresolved_tools()[0].call_id == "call-2"
     assert repository.event_payloads("run-1")[0]["authorization"] == "[REDACTED]"
 
     repository.close()
