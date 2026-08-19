@@ -222,6 +222,30 @@ class AgentCore:
                     )
                 )
             return result
+        try:
+            return self._run_prompt(run_id, user_input, control, event_sink)
+        finally:
+            with self._active_lock:
+                self._active_control = None
+                self._steering_open = False
+            self._apply_pending_steering_to_session()
+            try:
+                self._repository_call(
+                    "save_session",
+                    self._session.session_id,
+                    self._session.system_prompt,
+                    self._session.messages,
+                )
+            finally:
+                self._session.release_run()
+
+    def _run_prompt(
+        self,
+        run_id: str,
+        user_input: str,
+        control: RunControl,
+        event_sink: Callable[[AgentEvent], None] | None,
+    ) -> RunResult:
         with self._active_lock:
             self._active_control = control
             self._steering_open = True
@@ -293,12 +317,6 @@ class AgentCore:
                         step,
                     )
                     capabilities = _provider_capabilities(self._model)
-                    usage = usage_record(
-                        response,
-                        estimated_input=context.estimated_tokens,
-                        latency_ms=(time.perf_counter() - model_started) * 1000,
-                        capabilities=capabilities,
-                    )
                     checkpoint = checkpoint_for(
                         context.messages,
                         session_id=self._session.session_id,
@@ -316,7 +334,7 @@ class AgentCore:
                         latency_ms=(time.perf_counter() - model_started) * 1000,
                         capabilities=capabilities,
                         # The checkpoint is observable bookkeeping; no local model computation is reused.
-                        local_cache_hit=False,
+                        local_cache_hit=local_cache_hit,
                     )
                 except ContextError as error:
                     return self._error(
@@ -475,18 +493,6 @@ class AgentCore:
                 emit=emit,
                 context_metadata=context_metadata,
             )
-        finally:
-            with self._active_lock:
-                self._active_control = None
-                self._steering_open = False
-            self._apply_pending_steering_to_session()
-            self._repository_call(
-                "save_session",
-                self._session.session_id,
-                self._session.system_prompt,
-                self._session.messages,
-            )
-            self._session.release_run()
 
     def _discard_pending_steering(self) -> None:
         while True:

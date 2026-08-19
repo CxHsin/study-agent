@@ -549,3 +549,38 @@ def test_tool_errors_and_result_size_are_structured() -> None:
 
     assert result.error is not None
     assert result.error.code == "TOOL_RESULT_TOO_LARGE"
+
+
+def test_repository_failure_does_not_leave_session_busy() -> None:
+    class FinalModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            return ModelResponse(content="done")
+
+    class BrokenRepository:
+        def start_run(self, *args, **kwargs) -> None:
+            raise OSError("disk unavailable")
+
+    core = AgentCore(FinalModel(), repository=BrokenRepository())
+
+    for prompt in ("first", "second"):
+        try:
+            core.prompt(prompt)
+        except OSError as error:
+            assert str(error) == "disk unavailable"
+        else:
+            raise AssertionError("Repository failure should remain visible to the caller")
+
+
+def test_repeated_context_reports_local_checkpoint_hit() -> None:
+    class FinalModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            return ModelResponse(content="done")
+
+    core = AgentCore(FinalModel())
+    assert core.prompt("same context").stop_reason is StopReason.FINAL
+    core.session.clear()
+
+    result = core.prompt("same context")
+
+    model_event = next(event for event in result.events if event.kind is EventKind.MODEL_RESPONSE)
+    assert model_event.data["usage_record"].cache_hit_source == "local"

@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 
 from minimal_agent.core import RunControl
 from minimal_agent.protocol import ToolCall
@@ -16,7 +18,11 @@ def call(registry, name, arguments):
 
 def test_read_file_supports_inclusive_line_range(tmp_path):
     (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
-    result = call(WorkspaceTools(tmp_path).registry(), "read_file", {"path": "notes.txt", "start_line": 2, "end_line": 2})
+    result = call(
+        WorkspaceTools(tmp_path).registry(),
+        "read_file",
+        {"path": "notes.txt", "start_line": 2, "end_line": 2},
+    )
     assert result.ok and result.data["content"] == "two\n"
 
 
@@ -30,8 +36,17 @@ def test_read_file_rejects_workspace_escape_and_non_utf8(tmp_path):
 def test_bash_requires_confirmation_and_returns_process_data(tmp_path):
     denied = call(WorkspaceTools(tmp_path).registry(), "bash", {"command": "printf ok"})
     assert denied.error.code == "PERMISSION_DENIED"
-    result = call(WorkspaceTools(tmp_path, confirmation=Confirm()).registry(), "bash", {"command": "printf ok"})
-    assert result.ok and result.data == {"exit_code": 0, "stdout": "ok", "stderr": "", "timed_out": False}
+    result = call(
+        WorkspaceTools(tmp_path, confirmation=Confirm()).registry(),
+        "bash",
+        {"command": "printf ok"},
+    )
+    assert result.ok and result.data == {
+        "exit_code": 0,
+        "stdout": "ok",
+        "stderr": "",
+        "timed_out": False,
+    }
 
 
 def test_bash_timeout_and_cancellation_are_distinct(tmp_path):
@@ -40,5 +55,48 @@ def test_bash_timeout_and_cancellation_are_distinct(tmp_path):
     assert timed.ok and timed.data["timed_out"] is True
     control = RunControl()
     control.cancel()
-    cancelled = registry.execute(ToolCall("call", "bash", json.dumps({"command": "sleep 1"})), control=control)
+    cancelled = registry.execute(
+        ToolCall("call", "bash", json.dumps({"command": "sleep 1"})), control=control
+    )
     assert cancelled.error.code == "TOOL_CANCELLED"
+
+
+def test_bash_drains_and_clips_large_output_without_timing_out(tmp_path):
+    registry = WorkspaceTools(
+        tmp_path,
+        confirmation=Confirm(),
+        max_command_output_bytes=4096,
+    ).registry()
+
+    result = call(
+        registry,
+        "bash",
+        {"command": "printf %200000s x", "timeout_ms": 1000},
+    )
+
+    assert result.ok
+    assert result.data["timed_out"] is False
+    assert 0 < len(result.data["stdout"].encode("utf-8")) <= 4096
+
+
+def test_bash_cancellation_terminates_the_process_tree(tmp_path):
+    registry = WorkspaceTools(tmp_path, confirmation=Confirm()).registry()
+    control = RunControl()
+    outcome = []
+
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            registry.execute(
+                ToolCall("call", "bash", json.dumps({"command": "sleep 5 | cat"})),
+                control=control,
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    time.sleep(0.05)
+    control.cancel()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert outcome[0].error.code == "TOOL_CANCELLED"

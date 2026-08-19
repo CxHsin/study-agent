@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any
 
 from minimal_agent.core import AgentCore, RunResult, StopReason
+from minimal_agent.events import EventKind
 from minimal_agent.protocol import (
     ChatMessage,
     ModelAdapter,
@@ -297,10 +298,16 @@ class EvalRunner:
                 AgentSession(system_prompt=case.system_prompt),
                 max_steps=case.max_steps,
             )
+            pending_steering = list(case.steering_messages)
+
+            def drive_steering(event) -> None:
+                if event.kind is EventKind.RUN_STARTED:
+                    for message in pending_steering:
+                        core.steer(message)
+
+            core.subscribe(drive_steering)
             executor = ThreadPoolExecutor(max_workers=1)
             future = executor.submit(core.prompt, case.prompt)
-            for message in case.steering_messages:
-                core.steer(message)
             try:
                 result = future.result(timeout=self._limits.timeout_seconds)
             finally:
