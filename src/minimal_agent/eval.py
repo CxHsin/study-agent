@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from minimal_agent.core import AgentCore, RunResult, StopReason
-from minimal_agent.protocol import ChatMessage, ModelAdapter
+from minimal_agent.protocol import (
+    ChatMessage,
+    ModelAdapter,
+    ModelStreamChunk,
+    ProviderCapabilities,
+)
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolRegistry
 
@@ -45,6 +50,10 @@ class EvalExpectation:
     allowed_tools: tuple[str, ...] = ()
     tool_trace: tuple[ToolExpectation, ...] = ()
     trajectory_mode: str = "strict"
+    event_kinds: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
+    usage_source: str | None = None
+    cache_hit_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +106,10 @@ class EvalCase:
             ),
             tool_trace=trace,
             trajectory_mode=str(raw_expectation.get("trajectory_mode", "strict")),
+            event_kinds=tuple(str(item) for item in _sequence(raw_expectation.get("event_kinds"))),
+            capabilities=tuple(str(item) for item in _sequence(raw_expectation.get("capabilities"))),
+            usage_source=_optional_str(raw_expectation.get("usage_source")),
+            cache_hit_source=_optional_str(raw_expectation.get("cache_hit_source")),
         )
         case = cls(
             case_id,
@@ -185,6 +198,27 @@ class _CountingModel:
             raise EvalLimitError("token_budget exceeded")
         return self.model.complete(messages)
 
+    def capabilities(self) -> ProviderCapabilities:
+        callback = getattr(self.model, "capabilities", None)
+        if callable(callback):
+            return callback()
+        return ProviderCapabilities(streaming=callable(getattr(self.model, "stream", None)))
+
+    def stream(self, messages: Sequence[ChatMessage]):
+        stream = getattr(self.model, "stream", None)
+        if not callable(stream):
+            response = self.complete(messages)
+            yield ModelStreamChunk(content_delta=response.content, done=True)
+            return
+        if self.budget.calls >= self.limits.max_model_calls:
+            raise EvalLimitError("max_model_calls exceeded")
+        self.calls += 1
+        self.budget.calls += 1
+        self.budget.tokens += max(1, sum(len(str(value)) for message in messages for value in message.values()) // 4)
+        if self.budget.tokens > self.limits.token_budget:
+            raise EvalLimitError("token_budget exceeded")
+        yield from stream(messages)
+
 
 class EvalLimitError(RuntimeError):
     pass
@@ -254,7 +288,7 @@ class EvalRunner:
             return _inconclusive(
                 case, f"provider_unavailable: {error}", calls=counter.calls, elapsed=started
             )
-        hard = _hard_rules(result, case.expectation)
+        hard = _hard_rules(result, case.expectation, counter.capabilities())
         trajectory = compare_trajectory(result, case.expectation, tools)
         text = compare_text(result.final_response, case.expectation.final_text)
         passed = (
@@ -277,8 +311,10 @@ class EvalRunner:
         )
 
 
-def _hard_rules(result: RunResult, expected: EvalExpectation) -> list[RuleResult]:
-    return [
+def _hard_rules(
+    result: RunResult, expected: EvalExpectation, capabilities: ProviderCapabilities
+) -> list[RuleResult]:
+    rules = [
         RuleResult(
             "stop_reason",
             result.stop_reason.value == expected.stop_reason,
@@ -290,6 +326,20 @@ def _hard_rules(result: RunResult, expected: EvalExpectation) -> list[RuleResult
             "final response presence matches stop reason",
         ),
     ]
+    if expected.event_kinds:
+        observed = tuple(event.kind.value for event in result.events)
+        rules.append(RuleResult("event_kinds", observed == expected.event_kinds, f"expected {expected.event_kinds}, got {observed}"))
+    for capability in expected.capabilities:
+        supported = bool(getattr(capabilities, capability, False))
+        rules.append(RuleResult(f"capability:{capability}", supported, f"provider capability {capability}"))
+    usage_events = [event for event in result.events if event.kind.value == "model_response" and event.data.get("usage_record")]
+    if expected.usage_source:
+        actual = getattr(usage_events[-1].data["usage_record"], "source", "unknown") if usage_events else "unknown"
+        rules.append(RuleResult("usage_source", actual == expected.usage_source, f"expected {expected.usage_source}, got {actual}"))
+    if expected.cache_hit_source:
+        actual = getattr(usage_events[-1].data["usage_record"], "cache_hit_source", "unknown") if usage_events else "unknown"
+        rules.append(RuleResult("cache_hit_source", actual == expected.cache_hit_source, f"expected {expected.cache_hit_source}, got {actual}"))
+    return rules
 
 
 def compare_trajectory(

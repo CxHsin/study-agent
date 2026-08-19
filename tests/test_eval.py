@@ -72,6 +72,32 @@ def test_eval_runner_checks_final_text_and_strict_trajectory() -> None:
     assert report.cases[0].calls_used == 2
 
 
+def test_eval_optional_event_and_usage_assertions_remain_deterministic() -> None:
+    case = EvalCase.from_mapping(
+        {
+            "case_id": "stream-1",
+            "prompt": "hello",
+            "expectation": {
+                "event_kinds": [
+                    "run_started",
+                    "model_call_started",
+                    "model_response",
+                    "final_response",
+                ],
+                "usage_source": "estimated",
+                "cache_hit_source": "unknown",
+            },
+        }
+    )
+    report = EvalRunner(
+        lambda _: ScriptedModel([ModelResponse(content="ok")]),
+        limits=EvalLimits(max_model_calls=2),
+    ).run([case])
+
+    assert report.status == "passed"
+    assert report.cases[0].hard_rules[-2].name == "usage_source"
+
+
 def test_provider_exception_is_inconclusive_and_artifact_is_redacted(tmp_path) -> None:
     case = EvalCase.from_mapping(
         {
