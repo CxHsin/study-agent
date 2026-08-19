@@ -37,6 +37,17 @@ class Repository(Protocol):
         idempotent: bool = False,
     ) -> None: ...
 
+    def record_tool_lifecycle(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: str,
+        result: str,
+        *,
+        idempotent: bool = False,
+    ) -> None: ...
+
 
 class Redactor:
     _secret_key = re.compile(r"(?i)(api[_-]?key|authorization|cookie|token|secret|password)")
@@ -230,6 +241,29 @@ class SQLiteRepository:
                     int(idempotent),
                 ),
             )
+
+    def record_tool_lifecycle(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: str,
+        result: str,
+        *,
+        idempotent: bool = False,
+    ) -> None:
+        with self._connection:
+            encoded_arguments = _json(arguments, self.redactor)
+            encoded_result = _json(result, self.redactor)
+            for status, payload in (
+                ("requested", None),
+                ("started", None),
+                ("completed", encoded_result),
+            ):
+                self._connection.execute(
+                    "INSERT INTO tool_executions(run_id, call_id, name, arguments, status, result_json, idempotent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, call_id, name, encoded_arguments, status, payload, int(idempotent)),
+                )
 
     def unresolved_tools(self) -> tuple[UnresolvedTool, ...]:
         rows = self._connection.execute(

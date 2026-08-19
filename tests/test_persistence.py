@@ -67,6 +67,17 @@ def test_redacts_secrets_inside_json_strings(tmp_path) -> None:
     assert "supersecret" not in str(loaded)
 
 
+def test_tool_lifecycle_is_committed_as_one_transaction(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "lifecycle.sqlite")
+    repository.record_tool_lifecycle("run", "call", "read", "{}", '{"ok":true}')
+
+    assert repository.unresolved_tools() == ()
+    statuses = repository._connection.execute(
+        "SELECT status FROM tool_executions WHERE run_id='run' ORDER BY id"
+    ).fetchall()
+    assert [item[0] for item in statuses] == ["requested", "started", "completed"]
+
+
 def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:
     repository = SQLiteRepository(tmp_path / "restore.sqlite")
     repository.save_session("session", "system", [{"role": "user", "content": "hello"}])
