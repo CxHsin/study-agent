@@ -62,7 +62,7 @@ def test_stream_yields_incremental_content_and_preserves_terminal_order() -> Non
 
         def stream(self, messages: Sequence[ChatMessage]):
             yield ModelStreamChunk(content_delta="hel")
-            yield ModelStreamChunk(content_delta="lo")
+            yield ModelStreamChunk(content_delta="lo", done=True)
 
     events = list(AgentCore(StreamingModel()).stream("say hello"))
 

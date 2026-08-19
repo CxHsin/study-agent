@@ -417,7 +417,7 @@ class AgentCore:
             with self._active_lock:
                 self._active_control = None
                 self._steering_open = False
-            self._discard_pending_steering()
+            self._apply_pending_steering_to_session()
             self._session.release_run()
 
     def _discard_pending_steering(self) -> None:
@@ -426,6 +426,14 @@ class AgentCore:
                 self._steering.get_nowait()
             except queue.Empty:
                 return
+
+    def _apply_pending_steering_to_session(self) -> None:
+        while True:
+            try:
+                message = self._steering.get_nowait()
+            except queue.Empty:
+                return
+            self._session.append({"role": "user", "content": message})
 
     def _repository_call(self, method: str, *args, **kwargs) -> None:
         if self._repository is None:
@@ -598,6 +606,7 @@ def _model_response(
     order: list[str] = []
     usage = None
     provider_cache_hit = None
+    completed = False
     for chunk in stream(messages):
         if not isinstance(chunk, ModelStreamChunk):
             raise ModelError("Provider returned an invalid stream chunk.")
@@ -605,6 +614,8 @@ def _model_response(
             usage = chunk.usage
         if chunk.provider_cache_hit is not None:
             provider_cache_hit = chunk.provider_cache_hit
+        if chunk.done:
+            completed = True
         if chunk.content_delta:
             content_parts.append(chunk.content_delta)
             emit(
@@ -631,6 +642,8 @@ def _model_response(
             )
     if any(not calls[call_id]["name"] or not calls[call_id]["arguments"] for call_id in order):
         raise ModelError("Provider returned an incomplete Tool Call.")
+    if not completed:
+        raise ModelError("Provider stream ended before completion.")
     tool_calls = tuple(
         ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"])
         for call_id in order
