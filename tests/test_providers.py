@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
 from minimal_agent.protocol import ToolCall
-from minimal_agent.providers import AnthropicAdapter, OpenAIAdapter
+from minimal_agent.providers import (
+    AnthropicAdapter,
+    OpenAIAdapter,
+    _to_anthropic_messages,
+    _to_openai_message,
+)
 
 
 class FakeOpenAI:
@@ -51,3 +56,17 @@ def test_anthropic_adapter_maps_text_and_tool_use() -> None:
 
     assert result.content == "done"
     assert result.tool_calls[0].arguments == '{"path":"x"}'
+
+
+def test_provider_messages_normalize_multi_turn_tool_history() -> None:
+    assistant = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": (ToolCall("c1", "read", '{"path":"x"}'),),
+    }
+    tool = {"role": "tool", "tool_call_id": "c1", "content": '{"ok":true}'}
+
+    assert _to_openai_message(assistant)["tool_calls"][0]["function"]["name"] == "read"
+    _, anthropic = _to_anthropic_messages([assistant, tool])
+    assert anthropic[0]["content"][0]["type"] == "tool_use"
+    assert anthropic[1]["content"][0]["type"] == "tool_result"

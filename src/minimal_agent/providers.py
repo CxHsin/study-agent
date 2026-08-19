@@ -123,7 +123,21 @@ class AnthropicAdapter:
 
 
 def _to_openai_message(message: ChatMessage) -> dict[str, object]:
-    return dict(message)
+    converted = dict(message)
+    if converted.get("role") == "context_summary":
+        converted["role"] = "user"
+        converted.pop("summary_id", None)
+    if converted.get("role") == "assistant" and "tool_calls" in converted:
+        calls = cast(tuple[ToolCall, ...], converted["tool_calls"])
+        converted["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.name, "arguments": call.arguments},
+            }
+            for call in calls
+        ]
+    return converted
 
 
 def _to_anthropic_tool(definition: dict[str, object]) -> dict[str, object]:
@@ -147,7 +161,35 @@ def _to_anthropic_messages(
             continue
         if role == "context_summary":
             role = "user"
-        converted.append({"role": role, "content": message.get("content", "")})
+        if role == "assistant" and "tool_calls" in message:
+            blocks: list[dict[str, object]] = []
+            if message.get("content"):
+                blocks.append({"type": "text", "text": message["content"]})
+            blocks.extend(
+                {
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": _decoded_arguments(call.arguments),
+                }
+                for call in cast(tuple[ToolCall, ...], message["tool_calls"])
+            )
+            converted.append({"role": "assistant", "content": blocks})
+        elif role == "tool":
+            converted.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": message.get("tool_call_id", ""),
+                            "content": message.get("content", ""),
+                        }
+                    ],
+                }
+            )
+        else:
+            converted.append({"role": role, "content": message.get("content", "")})
     return system, converted
 
 
@@ -155,3 +197,12 @@ def _json_arguments(value: object) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _decoded_arguments(value: str) -> object:
+    import json
+
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return {}
