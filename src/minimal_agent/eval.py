@@ -17,8 +17,10 @@ from minimal_agent.core import AgentCore, RunResult, StopReason
 from minimal_agent.protocol import (
     ChatMessage,
     ModelAdapter,
+    ModelRequest,
     ModelStreamChunk,
     ProviderCapabilities,
+    message_to_dict,
 )
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolRegistry
@@ -196,18 +198,27 @@ class _CountingModel:
         self.limits = limits
         self.budget = budget
         self.calls = 0
+        if hasattr(model, "profile"):
+            self.profile = model.profile
 
-    def complete(self, messages: Sequence[ChatMessage]):
+    def complete(self, request: ModelRequest | Sequence[ChatMessage]):
+        messages = request.messages if isinstance(request, ModelRequest) else request
         if self.budget.calls >= self.limits.max_model_calls:
             raise EvalLimitError("max_model_calls exceeded")
         self.calls += 1
         self.budget.calls += 1
         self.budget.tokens += max(
-            1, sum(len(str(value)) for message in messages for value in message.values()) // 4
+            1,
+            sum(
+                len(str(value))
+                for message in messages
+                for value in message_to_dict(message, include_version=False).values()
+            )
+            // 4,
         )
         if self.budget.tokens > self.limits.token_budget:
             raise EvalLimitError("token_budget exceeded")
-        return self.model.complete(messages)
+        return self.model.complete(request)
 
     def capabilities(self) -> ProviderCapabilities:
         callback = getattr(self.model, "capabilities", None)
@@ -215,10 +226,11 @@ class _CountingModel:
             return callback()
         return ProviderCapabilities(streaming=callable(getattr(self.model, "stream", None)))
 
-    def stream(self, messages: Sequence[ChatMessage]):
+    def stream(self, request: ModelRequest | Sequence[ChatMessage]):
+        messages = request.messages if isinstance(request, ModelRequest) else request
         stream = getattr(self.model, "stream", None)
         if not callable(stream):
-            response = self.complete(messages)
+            response = self.complete(request)
             yield ModelStreamChunk(content_delta=response.content, done=True)
             return
         if self.budget.calls >= self.limits.max_model_calls:
@@ -226,11 +238,17 @@ class _CountingModel:
         self.calls += 1
         self.budget.calls += 1
         self.budget.tokens += max(
-            1, sum(len(str(value)) for message in messages for value in message.values()) // 4
+            1,
+            sum(
+                len(str(value))
+                for message in messages
+                for value in message_to_dict(message, include_version=False).values()
+            )
+            // 4,
         )
         if self.budget.tokens > self.limits.token_budget:
             raise EvalLimitError("token_budget exceeded")
-        yield from stream(messages)
+        yield from stream(request)
 
 
 class EvalLimitError(RuntimeError):

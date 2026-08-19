@@ -9,6 +9,9 @@ from typing import Protocol
 class EventKind(StrEnum):
     RUN_STARTED = "run_started"
     MODEL_CALL_STARTED = "model_call_started"
+    PROVIDER_ATTEMPT_STARTED = "provider_attempt_started"
+    PROVIDER_ATTEMPT_FAILED = "provider_attempt_failed"
+    PROVIDER_RETRY_SCHEDULED = "provider_retry_scheduled"
     MODEL_RESPONSE = "model_response"
     MODEL_CONTENT_DELTA = "model_content_delta"
     TOOL_CALL_DELTA = "tool_call_delta"

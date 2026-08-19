@@ -2,7 +2,7 @@ from collections.abc import Iterable
 from threading import Lock
 from uuid import uuid4
 
-from minimal_agent.protocol import ChatMessage
+from minimal_agent.protocol import ChatMessage, LegacyMessage, normalize_messages
 
 
 class AgentSession:
@@ -10,12 +10,12 @@ class AgentSession:
 
     def __init__(
         self,
-        messages: Iterable[ChatMessage] = (),
+        messages: Iterable[ChatMessage | LegacyMessage] = (),
         *,
         system_prompt: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        self._messages = list(messages)
+        self._messages = list(normalize_messages(messages))
         self._system_prompt = system_prompt
         self.session_id = session_id or str(uuid4())
         self._run_lock = Lock()
@@ -29,14 +29,19 @@ class AgentSession:
         return list(self._messages)
 
     def append(self, message: ChatMessage) -> None:
-        self._messages.append(message)
+        self._messages = list(normalize_messages((*self._messages, message)))
 
     def clear(self) -> None:
         self._messages.clear()
 
-    def restore(self, messages: Iterable[ChatMessage], *, system_prompt: str | None = None) -> None:
+    def restore(
+        self,
+        messages: Iterable[ChatMessage | LegacyMessage],
+        *,
+        system_prompt: str | None = None,
+    ) -> None:
         """Replace in-memory history with a repository snapshot."""
-        self._messages = list(messages)
+        self._messages = list(normalize_messages(messages))
         self._system_prompt = system_prompt
 
     def try_acquire_run(self) -> bool:

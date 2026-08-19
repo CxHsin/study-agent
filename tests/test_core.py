@@ -152,7 +152,7 @@ def test_stream_rejects_incomplete_tool_call_fragments() -> None:
     events = list(AgentCore(IncompleteModel()).stream("echo"))
 
     error = next(event for event in events if event.kind is EventKind.RUN_ERROR)
-    assert error.data["error"].code == "MODEL_ERROR"
+    assert error.data["error"].code == "INVALID_RESPONSE"
 
 
 def test_steering_is_applied_at_the_next_model_boundary() -> None:
@@ -391,7 +391,7 @@ def test_model_error_becomes_structured_run_error() -> None:
 
     assert result.stop_reason is StopReason.ERROR
     assert result.error is not None
-    assert result.error.code == "MODEL_ERROR"
+    assert result.error.code == "UNKNOWN"
 
 
 def test_run_result_contains_complete_trace_snapshot() -> None:

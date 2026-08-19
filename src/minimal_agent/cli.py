@@ -10,6 +10,7 @@ from minimal_agent.core import AgentCore
 from minimal_agent.deepseek import DeepSeekAdapter
 from minimal_agent.events import AgentEvent
 from minimal_agent.persistence import SQLiteRepository
+from minimal_agent.provider_client import ProviderClient
 from minimal_agent.workspace_tools import WorkspaceTools
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +66,7 @@ def create_core() -> AgentCore:
     workspace = PROJECT_ROOT / "workspace"
     workspace.mkdir(exist_ok=True)
     tools = WorkspaceTools(workspace).registry()
-    model = DeepSeekAdapter(api_key=api_key, tool_definitions=tools)
+    model = ProviderClient(DeepSeekAdapter(api_key=api_key))
     storage = PROJECT_ROOT / ".minimal-agent"
     storage.mkdir(exist_ok=True)
     repository = SQLiteRepository(storage / "agent.sqlite")

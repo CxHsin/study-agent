@@ -2,7 +2,15 @@ from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore
 from minimal_agent.persistence import InMemoryRepository, SQLiteRepository
-from minimal_agent.protocol import ChatMessage, ModelResponse, ToolCall
+from minimal_agent.protocol import (
+    MESSAGE_SCHEMA_VERSION,
+    AssistantMessage,
+    ChatMessage,
+    ModelResponse,
+    ToolCall,
+    ToolResultMessage,
+    UserMessage,
+)
 from minimal_agent.session import AgentSession
 
 
@@ -96,7 +104,7 @@ def test_core_continues_a_persisted_continuation_run(tmp_path) -> None:
     result = core.continue_run("child", "continue")
 
     assert result.final_response == "continued"
-    assert seen[0][0]["content"] == "old"
+    assert seen[0][0] == UserMessage("old")
 
 
 def test_continuation_injects_resolved_tool_result(tmp_path) -> None:
@@ -119,11 +127,9 @@ def test_continuation_injects_resolved_tool_result(tmp_path) -> None:
     restored = repository.continuation_session("child")
 
     assert restored is not None
-    assert restored[2][-1] == {
-        "role": "tool",
-        "tool_call_id": "call",
-        "content": '{"ok":true}',
-    }
+    assert isinstance(restored[2][-1], ToolResultMessage)
+    assert restored[2][-1].result.tool_call_id == "call"
+    assert restored[2][-1].result.ok is True
 
 
 def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:
@@ -132,7 +138,7 @@ def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) ->
     repository.start_run("run", "session")
     repository.record_tool("run", "call", "write", '{"password":"secret"}', "started")
 
-    assert repository.load_session("session") == ("system", ({"role": "user", "content": "hello"},))
+    assert repository.load_session("session") == ("system", (UserMessage("hello"),))
     repository.recover()
     assert repository.run_status("run") == "needs_resolution"
 
@@ -151,7 +157,12 @@ def test_session_round_trip_restores_nested_tool_calls(tmp_path) -> None:
 
     loaded = repository.load_session("s")
     assert loaded is not None
-    assert loaded[1][0]["tool_calls"] == (ToolCall("call", "read", '{"path":"notes"}'),)
+    assert loaded[1][0] == AssistantMessage(None, (ToolCall("call", "read", '{"path":"notes"}'),))
+
+    stored = repository._connection.execute(
+        "SELECT messages_json FROM sessions WHERE session_id='s'"
+    ).fetchone()
+    assert f'"schema_version":{MESSAGE_SCHEMA_VERSION}' in stored[0]
 
 
 def test_event_redaction_handles_nested_dataclass_values(tmp_path) -> None:

@@ -13,14 +13,24 @@ from minimal_agent.context import ContextBuilder, ContextError, ModelSummarizer
 from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
 from minimal_agent.protocol import (
+    AssistantMessage,
     ChatMessage,
     ModelAdapter,
-    ModelError,
+    ModelProfile,
+    ModelRequest,
     ModelResponse,
     ModelStreamChunk,
     ProviderCapabilities,
+    ProviderError,
+    ProviderErrorKind,
+    RequestOptions,
+    TextDelta,
     ToolCall,
+    ToolCallDelta,
+    ToolResultMessage,
+    UserMessage,
 )
+from minimal_agent.provider_client import ProviderClient, aggregate_stream
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolError, ToolRegistry, ToolResult
 
@@ -41,6 +51,10 @@ class RunError:
     error_type: str
     step: int
     tool_call_id: str | None = None
+    retryable: bool = False
+    status_code: int | None = None
+    provider_request_id: str | None = None
+    retry_after: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,12 @@ class AgentCore:
         self._session = session or AgentSession()
         self._max_steps = max_steps
         self._context_builder = context_builder or ContextBuilder(summarizer=ModelSummarizer(model))
+        profile = getattr(model, "profile", None)
+        if isinstance(profile, ModelProfile):
+            if self._context_builder.config.context_window_tokens > profile.context_window_tokens:
+                raise ValueError("ContextConfig exceeds the Model Profile context window.")
+            if self._context_builder.config.reserved_output_tokens > profile.max_output_tokens:
+                raise ValueError("ContextConfig output reserve exceeds the Model Profile limit.")
         self._repository = repository
         self._cache_store = PromptCacheStore()
         self._listeners: list[AgentEventListener] = []
@@ -211,7 +231,7 @@ class AgentCore:
         started_at = time.perf_counter()
         disabled_listeners: set[int] = set()
         context_metadata: list[dict[str, object]] = []
-        self._session.append({"role": "user", "content": user_input})
+        self._session.append(UserMessage(user_input))
         self._repository_call(
             "save_session",
             self._session.session_id,
@@ -231,6 +251,12 @@ class AgentCore:
         )
         last_fingerprint: str | None = None
         pending_repeat: str | None = None
+        seen_tool_call_ids = {
+            call.id
+            for message in self._session.messages
+            if isinstance(message, AssistantMessage)
+            for call in message.tool_calls
+        }
         try:
             for step in range(1, self._max_steps + 1):
                 stop = _control_stop(control)
@@ -258,7 +284,14 @@ class AgentCore:
                         "estimator": self._context_builder.estimator.name,
                     }
                     context_metadata.append(metadata)
-                    response = _model_response(self._model, context.messages, emit, step)
+                    response = _model_response(
+                        self._model,
+                        context.messages,
+                        self._tools.definitions(),
+                        self._context_builder.config.reserved_output_tokens,
+                        emit,
+                        step,
+                    )
                     capabilities = _provider_capabilities(self._model)
                     usage = usage_record(
                         response,
@@ -296,13 +329,14 @@ class AgentCore:
                         emit=emit,
                         context_metadata=context_metadata,
                     )
-                except ModelError as error:
+                except ProviderError as error:
                     return self._error(
                         run_id,
-                        "MODEL_ERROR",
+                        error.kind.value.upper(),
                         str(error) or "Model request failed.",
-                        "model_error",
+                        "provider_error",
                         step,
+                        provider_error=error,
                         trace=trace,
                         emit=emit,
                         context_metadata=context_metadata,
@@ -334,7 +368,7 @@ class AgentCore:
                             emit=emit,
                             context_metadata=context_metadata,
                         )
-                    self._session.append({"role": "assistant", "content": response.content})
+                    self._session.append(AssistantMessage(response.content))
                     self._close_steering()
                     emit(EventKind.FINAL_RESPONSE, {"step": step, "content": response.content})
                     return self._finish(
@@ -348,14 +382,19 @@ class AgentCore:
                         trace,
                     )
 
-                self._session.append(
-                    {
-                        "role": "assistant",
-                        "content": response.content,
-                        "tool_calls": response.tool_calls,
-                    }
-                )
                 fingerprints = [_fingerprint(call) for call in response.tool_calls]
+                if any(call.id in seen_tool_call_ids for call in response.tool_calls):
+                    return self._error(
+                        run_id,
+                        "REPEATED_TOOL_CALL",
+                        "Model repeated a Tool Call.",
+                        "control_error",
+                        step,
+                        StopReason.REPEATED_TOOL_CALL,
+                        trace=trace,
+                        emit=emit,
+                        context_metadata=context_metadata,
+                    )
                 if pending_repeat is not None and pending_repeat in fingerprints:
                     return self._error(
                         run_id,
@@ -368,6 +407,8 @@ class AgentCore:
                         emit=emit,
                         context_metadata=context_metadata,
                     )
+                self._session.append(AssistantMessage(response.content, response.tool_calls))
+                seen_tool_call_ids.update(call.id for call in response.tool_calls)
                 for tool_call in response.tool_calls:
                     stop = _control_stop(control)
                     if stop:
@@ -380,13 +421,7 @@ class AgentCore:
                             False,
                             error=ToolError("REPEATED_TOOL_CALL", "Repeated tool call blocked."),
                         )
-                        self._session.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": result.to_json(),
-                            }
-                        )
+                        self._session.append(ToolResultMessage(result))
                         emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(result))
                         pending_repeat = fingerprint
                         last_fingerprint = fingerprint
@@ -416,9 +451,7 @@ class AgentCore:
                         result.to_json(),
                         idempotent=definition.idempotent if definition else False,
                     )
-                    self._session.append(
-                        {"role": "tool", "tool_call_id": tool_call.id, "content": result.to_json()}
-                    )
+                    self._session.append(ToolResultMessage(result))
                     emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(result))
                     stop = _control_stop(control)
                     if stop:
@@ -468,7 +501,7 @@ class AgentCore:
                 message = self._steering.get_nowait()
             except queue.Empty:
                 return
-            self._session.append({"role": "user", "content": message})
+            self._session.append(UserMessage(message))
 
     def _repository_call(self, method: str, *args, **kwargs) -> None:
         if self._repository is None:
@@ -483,7 +516,7 @@ class AgentCore:
                 message = self._steering.get_nowait()
             except queue.Empty:
                 return
-            self._session.append({"role": "user", "content": message})
+            self._session.append(UserMessage(message))
             emit(
                 EventKind.STEERING_MESSAGE_ACCEPTED,
                 {"step": step, "content": message, "run_id": run_id},
@@ -535,12 +568,22 @@ class AgentCore:
         step: int,
         reason: StopReason = StopReason.ERROR,
         *,
+        provider_error: ProviderError | None = None,
         trace: list[AgentEvent],
         emit,
         context_metadata: list[dict[str, object]] | None = None,
     ) -> RunResult:
         self._close_steering()
-        error = RunError(code, message, error_type, step)
+        error = RunError(
+            code,
+            message,
+            error_type,
+            step,
+            retryable=provider_error.retryable if provider_error else False,
+            status_code=provider_error.status_code if provider_error else None,
+            provider_request_id=provider_error.request_id if provider_error else None,
+            retry_after=provider_error.retry_after if provider_error else None,
+        )
         emit(
             EventKind.RUN_ERROR,
             {"stop_reason": reason.value, "steps_used": step, "error": error},
@@ -628,9 +671,54 @@ def _fingerprint(tool_call: ToolCall) -> str:
 def _model_response(
     model: ModelAdapter,
     messages: tuple[ChatMessage, ...],
+    tool_definitions,
+    max_output_tokens: int,
     emit: Callable[[EventKind, dict[str, object]], None],
     step: int,
 ) -> ModelResponse:
+    if isinstance(getattr(model, "profile", None), ModelProfile):
+        events = []
+
+        def attempt_event(event) -> None:
+            error = event.error
+            emit(
+                EventKind(event.kind.value),
+                {
+                    "step": step,
+                    "attempt": event.attempt,
+                    "error_kind": error.kind.value if error else None,
+                    "retryable": error.retryable if error else None,
+                    "delay_seconds": event.delay_seconds,
+                },
+            )
+
+        request = ModelRequest(
+            messages,
+            RequestOptions(
+                tools=tuple(tool_definitions),
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+        stream = (
+            model.stream(request, on_attempt=attempt_event)
+            if isinstance(model, ProviderClient)
+            else model.stream(request)
+        )
+        for event in stream:
+            events.append(event)
+            if isinstance(event, TextDelta):
+                emit(EventKind.MODEL_CONTENT_DELTA, {"step": step, "content_delta": event.text})
+            elif isinstance(event, ToolCallDelta):
+                emit(
+                    EventKind.TOOL_CALL_DELTA,
+                    {
+                        "step": step,
+                        "tool_call_id": event.call_id,
+                        "name": event.name,
+                        "arguments_delta": event.arguments_delta,
+                    },
+                )
+        return aggregate_stream(events)
     capabilities = getattr(model, "capabilities", None)
     if callable(capabilities) and not capabilities().streaming:
         return model.complete(messages)
@@ -646,7 +734,10 @@ def _model_response(
     completed = False
     for chunk in stream(messages):
         if not isinstance(chunk, ModelStreamChunk):
-            raise ModelError("Provider returned an invalid stream chunk.")
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "Provider returned an invalid stream chunk.",
+            )
         if chunk.usage is not None:
             usage = chunk.usage
         if chunk.provider_cache_hit is not None:
@@ -678,14 +769,23 @@ def _model_response(
                 },
             )
     if any(not calls[call_id]["name"] or not calls[call_id]["arguments"] for call_id in order):
-        raise ModelError("Provider returned an incomplete Tool Call.")
+        raise ProviderError(
+            ProviderErrorKind.INVALID_RESPONSE,
+            "Provider returned an incomplete Tool Call.",
+        )
     if not completed:
-        raise ModelError("Provider stream ended before completion.")
+        raise ProviderError(
+            ProviderErrorKind.INVALID_RESPONSE,
+            "Provider stream ended before completion.",
+        )
     for call_id in order:
         try:
             json.loads(calls[call_id]["arguments"])
         except json.JSONDecodeError as error:
-            raise ModelError("Provider returned malformed Tool Call arguments.") from error
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "Provider returned malformed Tool Call arguments.",
+            ) from error
     tool_calls = tuple(
         ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"]) for call_id in order
     )

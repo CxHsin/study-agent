@@ -2,8 +2,15 @@ from collections.abc import Sequence
 
 from minimal_agent.context import ContextBuilder, ContextConfig, ContextError
 from minimal_agent.core import AgentCore, StopReason
-from minimal_agent.deepseek import _to_sdk_message
-from minimal_agent.protocol import ChatMessage, ModelResponse
+from minimal_agent.protocol import (
+    ChatMessage,
+    ContextSummaryMessage,
+    ModelRequest,
+    ModelResponse,
+    SystemMessage,
+    UserMessage,
+)
+from minimal_agent.providers import OpenAIMessageCodec
 from minimal_agent.session import AgentSession
 
 
@@ -42,9 +49,9 @@ def test_context_builder_keeps_system_prompt_and_compresses_old_history() -> Non
     built = builder.build(session.messages, system_prompt=session.system_prompt)
 
     assert built.compressed is True
-    assert built.messages[0] == {"role": "system", "content": "You are precise."}
-    assert built.messages[1]["role"] == "context_summary"
-    assert session.messages[0]["role"] == "user"
+    assert built.messages[0] == SystemMessage("You are precise.")
+    assert isinstance(built.messages[1], ContextSummaryMessage)
+    assert isinstance(session.messages[0], UserMessage)
     assert built.estimated_tokens_before > built.estimated_tokens
 
 
@@ -74,9 +81,10 @@ def test_context_error_is_structured_for_invalid_budget() -> None:
 
 
 def test_provider_translates_internal_context_summary() -> None:
-    message = _to_sdk_message(
-        {"role": "context_summary", "content": "facts", "summary_id": "summary-1"}
+    payload = OpenAIMessageCodec().request(
+        ModelRequest((ContextSummaryMessage("facts", "summary-1"),))
     )
+    message = payload["messages"][0]
     assert message == {
         "role": "user",
         "content": "[Context summary of earlier conversation]\nfacts",

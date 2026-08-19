@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from minimal_agent.deepseek import DeepSeekAdapter
 from minimal_agent.eval import EvalLimits, EvalRunner, load_cases
+from minimal_agent.provider_client import ProviderClient
 from minimal_agent.workspace_tools import WorkspaceTools
 
 
@@ -24,8 +25,7 @@ def main() -> int:
     cases = load_cases(args.cases)
 
     def model_factory(case):
-        tools = WorkspaceTools(Path("workspace")).registry()
-        return DeepSeekAdapter(api_key=api_key, tool_definitions=tools)
+        return ProviderClient(DeepSeekAdapter(api_key=api_key))
 
     def tools_factory(case):
         return WorkspaceTools(Path("workspace")).registry()

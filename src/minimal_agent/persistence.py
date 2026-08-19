@@ -9,7 +9,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from minimal_agent.protocol import ToolCall
+from minimal_agent.protocol import (
+    AssistantMessage,
+    ChatMessage,
+    ContextSummaryMessage,
+    SystemMessage,
+    ToolResult,
+    ToolResultMessage,
+    UserMessage,
+    message_to_dict,
+    normalize_messages,
+)
 
 SCHEMA_VERSION = 1
 
@@ -102,6 +112,11 @@ def _json(value: object, redactor: Redactor) -> str:
 
 def _jsonable(value: object) -> object:
     """Convert nested protocol records to JSON-compatible primitives."""
+    if isinstance(
+        value,
+        (SystemMessage, UserMessage, AssistantMessage, ToolResultMessage, ContextSummaryMessage),
+    ):
+        return _jsonable(message_to_dict(value))
     if is_dataclass(value):
         return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, Mapping):
@@ -111,21 +126,12 @@ def _jsonable(value: object) -> object:
     return value
 
 
-def _restore_messages(messages: object) -> tuple[dict[str, object], ...]:
-    restored: list[dict[str, object]] = []
-    for raw in messages if isinstance(messages, list) else ():
-        if not isinstance(raw, dict):
-            continue
-        message = dict(raw)
-        calls = message.get("tool_calls")
-        if isinstance(calls, list):
-            message["tool_calls"] = tuple(
-                ToolCall(str(call["id"]), str(call["name"]), str(call["arguments"]))
-                for call in calls
-                if isinstance(call, dict) and {"id", "name", "arguments"}.issubset(call)
-            )
-        restored.append(message)
-    return tuple(restored)
+def _restore_messages(messages: object) -> tuple[ChatMessage, ...]:
+    if not isinstance(messages, list):
+        raise TypeError("Session messages must be a JSON array.")
+    if not all(isinstance(message, dict) for message in messages):
+        raise TypeError("Session messages must contain only objects.")
+    return normalize_messages(messages)
 
 
 @dataclass(frozen=True)
@@ -184,19 +190,20 @@ class SQLiteRepository:
             )
 
     def save_session(self, session_id: str, system_prompt: str | None, messages: object) -> None:
+        stored_messages = (
+            normalize_messages(messages) if isinstance(messages, (list, tuple)) else messages
+        )
         with self._connection:
             self._connection.execute(
                 "INSERT INTO sessions VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET system_prompt=excluded.system_prompt, messages_json=excluded.messages_json",
                 (
                     session_id,
                     _json(system_prompt, self.redactor) if system_prompt is not None else None,
-                    _json(messages, self.redactor),
+                    _json(stored_messages, self.redactor),
                 ),
             )
 
-    def load_session(
-        self, session_id: str
-    ) -> tuple[str | None, tuple[dict[str, object], ...]] | None:
+    def load_session(self, session_id: str) -> tuple[str | None, tuple[ChatMessage, ...]] | None:
         row = self._connection.execute(
             "SELECT system_prompt, messages_json FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()
@@ -211,7 +218,7 @@ class SQLiteRepository:
         messages = json.loads(row[1])
         return system_prompt, _restore_messages(messages)
 
-    def latest_session(self) -> tuple[str, str | None, tuple[dict[str, object], ...]] | None:
+    def latest_session(self) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None:
         row = self._connection.execute(
             "SELECT session_id, system_prompt, messages_json FROM sessions ORDER BY rowid DESC LIMIT 1"
         ).fetchone()
@@ -227,7 +234,7 @@ class SQLiteRepository:
 
     def continuation_session(
         self, run_id: str
-    ) -> tuple[str, str | None, tuple[dict[str, object], ...]] | None:
+    ) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None:
         row = self._connection.execute(
             "SELECT session_id, parent_run_id FROM runs WHERE run_id=? AND parent_run_id IS NOT NULL",
             (run_id,),
@@ -245,8 +252,8 @@ class SQLiteRepository:
         self,
         parent_run_id: str,
         continuation_run_id: str,
-        messages: tuple[dict[str, object], ...],
-    ) -> tuple[dict[str, object], ...]:
+        messages: tuple[ChatMessage, ...],
+    ) -> tuple[ChatMessage, ...]:
         event = self._connection.execute(
             "SELECT data_json FROM events WHERE run_id=? AND kind='tool_resolved' ORDER BY sequence DESC LIMIT 1",
             (continuation_run_id,),
@@ -258,7 +265,8 @@ class SQLiteRepository:
         if not isinstance(call_id, str):
             return messages
         if any(
-            item.get("role") == "tool" and item.get("tool_call_id") == call_id for item in messages
+            isinstance(item, ToolResultMessage) and item.result.tool_call_id == call_id
+            for item in messages
         ):
             return messages
         row = self._connection.execute(
@@ -271,7 +279,20 @@ class SQLiteRepository:
         content = (
             decoded if isinstance(decoded, str) else json.dumps(decoded, separators=(",", ":"))
         )
-        return (*messages, {"role": "tool", "tool_call_id": call_id, "content": content})
+        tool_name = next(
+            (
+                call.name
+                for message in messages
+                if isinstance(message, AssistantMessage)
+                for call in message.tool_calls
+                if call.id == call_id
+            ),
+            "",
+        )
+        decoded_result = json.loads(content)
+        ok = bool(decoded_result.get("ok", True)) if isinstance(decoded_result, dict) else True
+        data = decoded_result.get("data") if isinstance(decoded_result, dict) else decoded_result
+        return (*messages, ToolResultMessage(ToolResult(call_id, tool_name, ok, data=data)))
 
     def recover(self) -> tuple[UnresolvedTool, ...]:
         unresolved = self.unresolved_tools()

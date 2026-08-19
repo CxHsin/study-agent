@@ -1,6 +1,8 @@
 # Minimal Agent Harness
 
-A small interactive console Agent built to make the model/tool loop explicit. It uses DeepSeek for model decisions and exposes only read-only tools inside the local `workspace/` directory.
+A small interactive console Agent built to make the model/tool loop explicit. The console
+uses DeepSeek by default, while the runtime also includes OpenAI and optional Anthropic
+Provider Adapters behind one typed model protocol.
 
 ## Setup
 
@@ -16,6 +18,12 @@ DEEPSEEK_API_KEY=your-key-here
 ```
 
 The real `.env` file is ignored by Git.
+
+Install the optional Anthropic SDK when using that adapter:
+
+```powershell
+uv sync --extra anthropic --dev
+```
 
 ## Run
 
@@ -39,7 +47,13 @@ user task
 -> Final Response or terminal guard
 ```
 
-The Adapter uses `deepseek-v4-flash` through the OpenAI-compatible Chat Completions interface and explicitly disables thinking mode. The current Core is intentionally synchronous and in-memory; persistence, streaming, and recovery are later learning stages.
+The default Adapter uses `deepseek-v4-flash` through the OpenAI-compatible Chat
+Completions interface and explicitly disables thinking mode. Provider-specific Message
+Codecs translate immutable internal messages, Tool Calls, Tool Results, summaries, and
+stream fragments. A shared Provider Client validates the configured Model Profile,
+aggregates synchronous responses, applies bounded retries before output is exposed, and
+classifies authentication, rate-limit, timeout, network, request, server, and response
+failures. Sessions and recovery checkpoints are persisted locally in SQLite.
 
 ## Verify
 

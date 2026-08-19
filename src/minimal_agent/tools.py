@@ -7,37 +7,14 @@ from typing import Protocol
 
 from jsonschema import Draft202012Validator, SchemaError, ValidationError
 
-from minimal_agent.protocol import ToolCall
-
-
-class ToolError(RuntimeError):
-    def __init__(self, code: str, message: str, retryable: bool = False) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.retryable = retryable
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    tool_call_id: str
-    tool_name: str
-    ok: bool
-    data: object = None
-    error: ToolError | None = None
-    retryable: bool = False
-
-    def to_json(self) -> str:
-        payload: dict[str, object] = {"ok": self.ok}
-        if self.ok:
-            payload["data"] = self.data
-        elif self.error:
-            payload["error"] = {
-                "code": self.error.code,
-                "message": self.error.message,
-                "retryable": self.retryable,
-            }
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+from minimal_agent.protocol import (
+    ToolCall,
+    ToolError,
+    ToolResult,
+)
+from minimal_agent.protocol import (
+    ToolDefinition as ProtocolToolDefinition,
+)
 
 
 class ToolAuthorizer(Protocol):
@@ -93,16 +70,13 @@ class ToolDefinition:
             if set(properties) != required:
                 raise ValueError("Strict tool schemas must mark every property as required.")
 
-    def definition(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
-            "strict": self.strict,
-            "read_only": self.read_only,
-            "idempotent": self.idempotent,
-            "requires_confirmation": self.requires_confirmation,
-        }
+    def definition(self) -> ProtocolToolDefinition:
+        return ProtocolToolDefinition(
+            self.name,
+            self.description,
+            self.parameters,
+            self.strict,
+        )
 
 
 class ToolRegistry:
@@ -123,7 +97,7 @@ class ToolRegistry:
             raise ValueError(f"Tool already registered: {definition.name}")
         self._definitions[definition.name] = definition
 
-    def definitions(self) -> tuple[dict[str, object], ...]:
+    def definitions(self) -> tuple[ProtocolToolDefinition, ...]:
         return tuple(item.definition() for item in self._definitions.values())
 
     def get(self, name: str) -> ToolDefinition | None:
@@ -132,7 +106,14 @@ class ToolRegistry:
     def all_read_only(self) -> bool:
         return all(definition.read_only for definition in self._definitions.values())
 
-    def execute(self, tool_call: ToolCall, *, run_id: str = "", user_input: str = "", control: object | None = None) -> ToolResult:
+    def execute(
+        self,
+        tool_call: ToolCall,
+        *,
+        run_id: str = "",
+        user_input: str = "",
+        control: object | None = None,
+    ) -> ToolResult:
         definition = self._definitions.get(tool_call.name)
         if definition is None:
             return _failure(tool_call, "UNKNOWN_TOOL", f"Unknown tool: {tool_call.name}")

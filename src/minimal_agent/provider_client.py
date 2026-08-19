@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import json
+import random
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, replace
+from enum import StrEnum
+
+from minimal_agent.protocol import (
+    ModelAdapter,
+    ModelRequest,
+    ModelResponse,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderStreamEvent,
+    StreamEnd,
+    StreamError,
+    TextDelta,
+    ToolCall,
+    ToolCallDelta,
+    UsageUpdate,
+)
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    max_attempts: int = 3
+    base_delay: float = 0.25
+    max_delay: float = 4.0
+    jitter: float = 0.1
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be positive.")
+        if min(self.base_delay, self.max_delay, self.jitter) < 0:
+            raise ValueError("Retry delays cannot be negative.")
+
+
+class ProviderAttemptKind(StrEnum):
+    STARTED = "provider_attempt_started"
+    FAILED = "provider_attempt_failed"
+    RETRY_SCHEDULED = "provider_retry_scheduled"
+
+
+@dataclass(frozen=True)
+class ProviderAttemptEvent:
+    kind: ProviderAttemptKind
+    attempt: int
+    error: ProviderError | None = None
+    delay_seconds: float | None = None
+
+
+AttemptListener = Callable[[ProviderAttemptEvent], None]
+
+
+class ProviderClient:
+    def __init__(
+        self,
+        adapter: ModelAdapter,
+        *,
+        retry_policy: RetryPolicy | None = None,
+        attempt_timeout: float = 30.0,
+        total_timeout: float = 60.0,
+        on_attempt: AttemptListener | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        random_value: Callable[[], float] = random.random,
+    ) -> None:
+        if attempt_timeout <= 0 or total_timeout <= 0:
+            raise ValueError("Provider timeouts must be positive.")
+        self.adapter = adapter
+        self.profile = adapter.profile
+        self.retry_policy = retry_policy or RetryPolicy()
+        self.attempt_timeout = attempt_timeout
+        self.total_timeout = total_timeout
+        self._on_attempt = on_attempt
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._random = random_value
+
+    @property
+    def model_name(self) -> str:
+        return self.profile.model
+
+    def capabilities(self):
+        return self.profile.capabilities
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        return aggregate_stream(self.stream(request))
+
+    def stream(
+        self, request: ModelRequest, *, on_attempt: AttemptListener | None = None
+    ) -> Iterator[ProviderStreamEvent]:
+        self._validate(request)
+        if request.options.stream and not self.profile.streaming:
+            request = replace(request, options=replace(request.options, stream=False))
+        listener = on_attempt or self._on_attempt
+        started = self._monotonic()
+        for attempt in range(1, self.retry_policy.max_attempts + 1):
+            remaining = self.total_timeout - (self._monotonic() - started)
+            if remaining <= 0:
+                yield StreamError(
+                    ProviderError(
+                        ProviderErrorKind.TIMEOUT,
+                        "Provider call exceeded its total deadline.",
+                        retryable=True,
+                    )
+                )
+                return
+            self._notify(ProviderAttemptEvent(ProviderAttemptKind.STARTED, attempt), listener)
+            request_for_attempt = _with_timeout(request, min(self.attempt_timeout, remaining))
+            exposed = False
+            terminal_error: ProviderError | None = None
+            try:
+                for event in self.adapter.stream(request_for_attempt):
+                    if isinstance(event, StreamError):
+                        terminal_error = event.error
+                        break
+                    exposed = True
+                    yield event
+            except ProviderError as error:
+                terminal_error = error
+            except Exception as error:  # noqa: BLE001 - adapter boundary normalizes unknown failures
+                terminal_error = ProviderError(
+                    ProviderErrorKind.UNKNOWN,
+                    "Provider adapter failed.",
+                    retryable=False,
+                )
+                terminal_error.__cause__ = error
+            if terminal_error is None:
+                return
+            self._notify(
+                ProviderAttemptEvent(ProviderAttemptKind.FAILED, attempt, error=terminal_error),
+                listener,
+            )
+            if exposed or not terminal_error.retryable or attempt >= self.retry_policy.max_attempts:
+                yield StreamError(terminal_error)
+                return
+            delay = self._retry_delay(terminal_error, attempt)
+            remaining = self.total_timeout - (self._monotonic() - started)
+            if delay >= remaining:
+                yield StreamError(
+                    ProviderError(
+                        ProviderErrorKind.TIMEOUT,
+                        "Provider retry would exceed the total deadline.",
+                        retryable=True,
+                    )
+                )
+                return
+            self._notify(
+                ProviderAttemptEvent(
+                    ProviderAttemptKind.RETRY_SCHEDULED,
+                    attempt,
+                    error=terminal_error,
+                    delay_seconds=delay,
+                ),
+                listener,
+            )
+            self._sleep(delay)
+
+    def _validate(self, request: ModelRequest) -> None:
+        options = request.options
+        if options.tools and not self.profile.tool_calls:
+            raise ProviderError(
+                ProviderErrorKind.UNSUPPORTED_CAPABILITY,
+                f"Model {self.profile.model} does not support Tool Calls.",
+            )
+        output = options.max_output_tokens or self.profile.max_output_tokens
+        if output > self.profile.max_output_tokens:
+            raise ProviderError(
+                ProviderErrorKind.INVALID_REQUEST,
+                "Requested output tokens exceed the Model Profile limit.",
+            )
+
+    def _retry_delay(self, error: ProviderError, attempt: int) -> float:
+        if error.retry_after is not None:
+            return max(0.0, error.retry_after)
+        base = min(self.retry_policy.max_delay, self.retry_policy.base_delay * 2 ** (attempt - 1))
+        return base + base * self.retry_policy.jitter * self._random()
+
+    def _notify(self, event: ProviderAttemptEvent, listener: AttemptListener | None) -> None:
+        if listener is not None:
+            listener(event)
+
+
+def aggregate_stream(events) -> ModelResponse:
+    content: list[str] = []
+    calls: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    usage = None
+    cache_hit = None
+    ended = False
+    for event in events:
+        if isinstance(event, TextDelta):
+            content.append(event.text)
+        elif isinstance(event, ToolCallDelta):
+            if event.call_id not in calls:
+                calls[event.call_id] = {"name": event.name or "", "arguments": ""}
+                order.append(event.call_id)
+            call = calls[event.call_id]
+            if event.name:
+                call["name"] = event.name
+            call["arguments"] += event.arguments_delta
+        elif isinstance(event, UsageUpdate):
+            usage = event.usage
+            cache_hit = event.provider_cache_hit
+        elif isinstance(event, StreamError):
+            raise event.error
+        elif isinstance(event, StreamEnd):
+            ended = True
+    if not ended:
+        raise ProviderError(
+            ProviderErrorKind.INVALID_RESPONSE,
+            "Provider stream ended without a completion event.",
+        )
+    tool_calls: list[ToolCall] = []
+    for call_id in order:
+        call = calls[call_id]
+        if not call["name"] or not call["arguments"]:
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "Provider returned an incomplete Tool Call.",
+            )
+        try:
+            json.loads(call["arguments"])
+        except json.JSONDecodeError as error:
+            raise ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "Provider returned malformed Tool Call arguments.",
+            ) from error
+        tool_calls.append(ToolCall(call_id, call["name"], call["arguments"]))
+    text = "".join(content) or None
+    if text is None and not tool_calls:
+        raise ProviderError(
+            ProviderErrorKind.INVALID_RESPONSE,
+            "Provider returned neither text nor Tool Calls.",
+        )
+    return ModelResponse(text, tuple(tool_calls), usage, cache_hit)
+
+
+def _with_timeout(request: ModelRequest, timeout: float) -> ModelRequest:
+    metadata = dict(request.options.metadata)
+    metadata["request_timeout_seconds"] = timeout
+    return replace(request, options=replace(request.options, metadata=metadata))

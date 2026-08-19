@@ -56,6 +56,26 @@ _Avoid_: Working directory, repository root
 A boundary that translates an external model API into the Internal Message Protocol used by Agent Core.
 _Avoid_: Model implementation, Tool Registry
 
+**Provider Client**:
+The provider-independent model-call boundary that applies request validation, capability fallback, response aggregation, retry policy, and time limits around a Provider Adapter.
+_Avoid_: Provider Adapter, SDK client
+
+**Model Profile**:
+The declared request limits and supported protocol features of one configured model, including its context and output token ceilings.
+_Avoid_: Provider capability, model name
+
+**Model Request**:
+A single provider-independent request containing typed model-facing messages, Local Tool definitions, and call-specific generation choices.
+_Avoid_: Provider payload, Session
+
+**Provider Stream Event**:
+A typed, provider-independent increment produced during one model call, such as text, Tool Call data, usage, completion, or failure.
+_Avoid_: Agent Event, SDK chunk
+
+**Message Codec**:
+The Provider-specific translator between the Internal Message Protocol and one external model API's request, response, and streaming representations.
+_Avoid_: Context Builder, Provider Client
+
 **RunResult**:
 The explicit outcome of one Agent Core prompt, including its final response, stop reason, steps used, run ID, and an optional structured error.
 _Avoid_: AgentResult, status-only result
@@ -157,8 +177,16 @@ A user message that starts a new Run while continuing the same Conversation Sess
 _Avoid_: Steering Message, retry command
 
 **Provider Capability**:
-An explicit declaration of which protocol features a Provider Adapter supports, such as streaming, tool calls, usage reporting, or prompt-cache metadata.
+An explicit feature of a configured Model Profile, such as streaming, Tool Calls, parallel Tool Call generation, usage reporting, or prompt-cache metadata.
 _Avoid_: Provider-specific workaround, feature flag
+
+**Provider Error**:
+A provider-independent failure classification carrying retry and diagnostic facts from one external model call without exposing an SDK exception as the Runtime contract.
+_Avoid_: Tool Error, raw SDK exception
+
+**Retry Policy**:
+The bounded rule used by a Provider Client to repeat a model attempt only before any model output has been exposed to its caller.
+_Avoid_: SDK retry, Tool retry
 
 **Recovery Checkpoint**:
 A persisted safe boundary containing enough Session and Run records to resume after a process restart without assuming an unfinished external Tool Execution can be replayed.

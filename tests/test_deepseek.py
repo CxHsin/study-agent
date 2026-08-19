@@ -1,10 +1,19 @@
 from types import SimpleNamespace
 
-from openai import OpenAIError
-
 from minimal_agent.deepseek import DeepSeekAdapter
-from minimal_agent.protocol import ModelError, ToolCall
-from minimal_agent.workspace_tools import WorkspaceTools
+from minimal_agent.protocol import (
+    AssistantMessage,
+    ModelRequest,
+    ProviderError,
+    ProviderErrorKind,
+    RequestOptions,
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+    ToolResultMessage,
+    UserMessage,
+)
+from minimal_agent.provider_client import ProviderClient
 
 
 class FakeCompletions:
@@ -25,49 +34,46 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=completions)
 
 
-def test_adapter_sends_deepseek_tool_call_request(tmp_path) -> None:
+def test_adapter_sends_deepseek_typed_tool_call_request() -> None:
     completion = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="Done.", tool_calls=None))]
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Done.", tool_calls=None))],
+        usage=None,
     )
     completions = FakeCompletions(response=completion)
-    tools = WorkspaceTools(tmp_path)
-    adapter = DeepSeekAdapter(
-        api_key="test-key",
-        tool_definitions=tools.definitions(),
-        client=FakeClient(completions),
-    )
-    messages = [
-        {"role": "user", "content": "Read notes.txt"},
+    adapter = DeepSeekAdapter(api_key="test-key", client=FakeClient(completions))
+    tool = ToolDefinition(
+        "read_file",
+        "Read text",
         {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": (
-                ToolCall(id="call-1", name="read_file", arguments='{"path":"notes.txt"}'),
-            ),
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "additionalProperties": False,
         },
-        {"role": "tool", "tool_call_id": "call-1", "content": '{"ok":true}'},
-    ]
+    )
+    messages = (
+        UserMessage("Read notes.txt"),
+        AssistantMessage(
+            None,
+            (ToolCall(id="call-1", name="read_file", arguments='{"path":"notes.txt"}'),),
+        ),
+        ToolResultMessage(ToolResult("call-1", "read_file", True, data={"ok": True})),
+    )
 
-    result = adapter.complete(messages)
+    result = ProviderClient(adapter).complete(ModelRequest(messages, RequestOptions(tools=(tool,))))
 
     assert result.content == "Done."
     request = completions.requests[0]
     assert request["model"] == "deepseek-v4-flash"
     assert request["extra_body"] == {"thinking": {"type": "disabled"}}
     assert request["tool_choice"] == "auto"
-    assert [tool["function"]["name"] for tool in request["tools"]] == [
-        "read_file",
-        "bash",
-    ]
-    assistant_message = request["messages"][1]
-    assert assistant_message["tool_calls"][0] == {
-        "id": "call-1",
-        "type": "function",
-        "function": {"name": "read_file", "arguments": '{"path":"notes.txt"}'},
+    assert request["messages"][1]["tool_calls"][0]["function"] == {
+        "name": "read_file",
+        "arguments": '{"path":"notes.txt"}',
     }
 
 
-def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
+def test_adapter_converts_deepseek_tool_calls() -> None:
     completion = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -76,53 +82,50 @@ def test_adapter_converts_deepseek_tool_calls(tmp_path) -> None:
                     tool_calls=[
                         SimpleNamespace(
                             id="call-1",
-                            function=SimpleNamespace(
-                                name="read_file",
-                                arguments='{"path":"x"}',
-                            ),
+                            function=SimpleNamespace(name="read_file", arguments='{"path":"x"}'),
                         )
                     ],
                 )
             )
-        ]
+        ],
+        usage=None,
     )
-    tools = WorkspaceTools(tmp_path)
-    adapter = DeepSeekAdapter(
-        api_key="test-key",
-        tool_definitions=tools.definitions(),
-        client=FakeClient(FakeCompletions(response=completion)),
+    client = ProviderClient(
+        DeepSeekAdapter(api_key="test-key", client=FakeClient(FakeCompletions(response=completion)))
     )
 
-    result = adapter.complete([{"role": "user", "content": "Read x"}])
+    result = client.complete(ModelRequest((UserMessage("Read x"),)))
 
-    assert result.tool_calls == (
-        ToolCall(id="call-1", name="read_file", arguments='{"path":"x"}'),
-    )
+    assert result.tool_calls == (ToolCall(id="call-1", name="read_file", arguments='{"path":"x"}'),)
 
 
-def test_deepseek_declares_provider_capabilities(tmp_path) -> None:
-    adapter = DeepSeekAdapter(
-        api_key="test-key", tool_definitions=WorkspaceTools(tmp_path).definitions(), client=object()
-    )
+def test_deepseek_profile_declares_model_capabilities() -> None:
+    client = ProviderClient(DeepSeekAdapter(api_key="test-key", client=object()))
 
-    capabilities = adapter.capabilities()
-
-    assert capabilities.tool_calls is True
-    assert capabilities.streaming is False
-    assert capabilities.prompt_cache is False
+    assert client.profile.tool_calls is True
+    assert client.profile.streaming is True
+    assert client.profile.prompt_cache is True
+    assert client.profile.context_window_tokens == 128_000
 
 
-def test_model_errors_are_exposed_as_model_errors(tmp_path) -> None:
-    tools = WorkspaceTools(tmp_path)
-    adapter = DeepSeekAdapter(
-        api_key="test-key",
-        tool_definitions=tools.definitions(),
-        client=FakeClient(FakeCompletions(error=OpenAIError("network failed"))),
+def test_sdk_errors_are_classified() -> None:
+    class RateLimitError(Exception):
+        status_code = 429
+        request_id = "request-1"
+
+    client = ProviderClient(
+        DeepSeekAdapter(
+            api_key="test-key", client=FakeClient(FakeCompletions(error=RateLimitError()))
+        ),
+        retry_policy=None,
+        sleep=lambda _delay: None,
     )
 
     try:
-        adapter.complete([{"role": "user", "content": "List files"}])
-    except ModelError as error:
-        assert str(error) == "DeepSeek request failed."
+        client.complete(ModelRequest((UserMessage("List files"),)))
+    except ProviderError as error:
+        assert error.kind is ProviderErrorKind.RATE_LIMIT
+        assert error.retryable is True
+        assert error.request_id == "request-1"
     else:
-        raise AssertionError("Expected ModelError")
+        raise AssertionError("Expected ProviderError")
