@@ -229,12 +229,49 @@ class SQLiteRepository:
         self, run_id: str
     ) -> tuple[str, str | None, tuple[dict[str, object], ...]] | None:
         row = self._connection.execute(
-            "SELECT session_id FROM runs WHERE run_id=? AND parent_run_id IS NOT NULL", (run_id,)
+            "SELECT session_id, parent_run_id FROM runs WHERE run_id=? AND parent_run_id IS NOT NULL",
+            (run_id,),
         ).fetchone()
         if row is None:
             return None
         loaded = self.load_session(row[0])
-        return None if loaded is None else (row[0], loaded[0], loaded[1])
+        if loaded is None:
+            return None
+        system_prompt, messages = loaded
+        messages = self._inject_resolved_tool_result(row[1], run_id, messages)
+        return row[0], system_prompt, messages
+
+    def _inject_resolved_tool_result(
+        self,
+        parent_run_id: str,
+        continuation_run_id: str,
+        messages: tuple[dict[str, object], ...],
+    ) -> tuple[dict[str, object], ...]:
+        event = self._connection.execute(
+            "SELECT data_json FROM events WHERE run_id=? AND kind='tool_resolved' ORDER BY sequence DESC LIMIT 1",
+            (continuation_run_id,),
+        ).fetchone()
+        if event is None:
+            return messages
+        data = json.loads(event[0])
+        call_id = data.get("call_id") if isinstance(data, dict) else None
+        if not isinstance(call_id, str):
+            return messages
+        if any(
+            item.get("role") == "tool" and item.get("tool_call_id") == call_id for item in messages
+        ):
+            return messages
+        row = self._connection.execute(
+            "SELECT result_json FROM tool_executions WHERE run_id=? AND call_id=? AND status='completed' ORDER BY id DESC LIMIT 1",
+            (parent_run_id, call_id),
+        ).fetchone()
+        if row is None:
+            return messages
+        decoded = json.loads(row[0])
+        content = (
+            decoded if isinstance(decoded, str) else json.dumps(decoded, separators=(",", ":"))
+        )
+        return (*messages, {"role": "tool", "tool_call_id": call_id, "content": content})
 
     def recover(self) -> tuple[UnresolvedTool, ...]:
         unresolved = self.unresolved_tools()

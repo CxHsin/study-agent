@@ -99,6 +99,33 @@ def test_core_continues_a_persisted_continuation_run(tmp_path) -> None:
     assert seen[0][0]["content"] == "old"
 
 
+def test_continuation_injects_resolved_tool_result(tmp_path) -> None:
+    repository = SQLiteRepository(tmp_path / "resolved-continuation.sqlite")
+    repository.save_session(
+        "s",
+        None,
+        [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": (ToolCall("call", "read", "{}"),),
+            }
+        ],
+    )
+    repository.start_run("parent", "s")
+    repository.record_tool_started("parent", "call", "read", "{}")
+    repository.resolve_tool("parent", "call", '{"ok":true}', "child", "s")
+
+    restored = repository.continuation_session("child")
+
+    assert restored is not None
+    assert restored[2][-1] == {
+        "role": "tool",
+        "tool_call_id": "call",
+        "content": '{"ok":true}',
+    }
+
+
 def test_repository_loads_session_and_marks_unknown_tool_resolution(tmp_path) -> None:
     repository = SQLiteRepository(tmp_path / "restore.sqlite")
     repository.save_session("session", "system", [{"role": "user", "content": "hello"}])
