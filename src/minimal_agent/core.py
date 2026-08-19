@@ -10,6 +10,7 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from minimal_agent.context import ContextBuilder, ContextError, ModelSummarizer
+from minimal_agent.cost import checkpoint_for, usage_record
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
 from minimal_agent.protocol import (
     ChatMessage,
@@ -17,6 +18,7 @@ from minimal_agent.protocol import (
     ModelError,
     ModelResponse,
     ModelStreamChunk,
+    ProviderCapabilities,
     ToolCall,
 )
 from minimal_agent.session import AgentSession
@@ -152,13 +154,25 @@ class AgentCore:
         run_id = str(uuid4())
         control = control or RunControl()
         if not self._session.try_acquire_run():
-            return RunResult(
+            result = RunResult(
                 None,
                 StopReason.ERROR,
                 0,
                 run_id,
                 RunError("SESSION_BUSY", "Conversation Session already has an active Run.", "control_error", 0),
             )
+            if event_sink is not None:
+                event_sink(
+                    AgentEvent(
+                        run_id,
+                        EventKind.RUN_ERROR,
+                        {"stop_reason": StopReason.ERROR.value, "steps_used": 0, "error": result.error},
+                        1,
+                        datetime.now(UTC),
+                        0,
+                    )
+                )
+            return result
         with self._active_lock:
             self._active_control = control
             self._steering_open = True
@@ -198,6 +212,7 @@ class AgentCore:
                     EventKind.MODEL_CALL_STARTED,
                     {"step": step, "message_count": len(self._session.messages)},
                 )
+                model_started = time.perf_counter()
                 try:
                     context = self._context_builder.build(
                         self._session.messages, system_prompt=self._session.system_prompt
@@ -215,6 +230,22 @@ class AgentCore:
                     }
                     context_metadata.append(metadata)
                     response = _model_response(self._model, context.messages, emit, step)
+                    capabilities = _provider_capabilities(self._model)
+                    usage = usage_record(
+                        response,
+                        estimated_input=context.estimated_tokens,
+                        latency_ms=(time.perf_counter() - model_started) * 1000,
+                        capabilities=capabilities,
+                    )
+                    checkpoint = checkpoint_for(
+                        context.messages,
+                        session_id=self._session.session_id,
+                        message_index=len(context.messages),
+                        model=type(self._model).__name__,
+                        tool_schema=self._tools.definitions(),
+                        system_prompt=self._session.system_prompt,
+                        context_builder=self._context_builder.estimator.name,
+                    )
                 except ContextError as error:
                     return self._error(
                         run_id,
@@ -245,6 +276,8 @@ class AgentCore:
                         "tool_calls": tuple(_tool_data(call) for call in response.tool_calls),
                         "usage": response.usage,
                         "provider_cache_hit": response.provider_cache_hit,
+                        "usage_record": usage,
+                        "prompt_cache_checkpoint": checkpoint,
                     },
                 )
                 stop = _control_stop(control)
@@ -263,6 +296,7 @@ class AgentCore:
                             context_metadata=context_metadata,
                         )
                     self._session.append({"role": "assistant", "content": response.content})
+                    self._close_steering()
                     emit(EventKind.FINAL_RESPONSE, {"step": step, "content": response.content})
                     return self._finish(
                         RunResult(
@@ -413,8 +447,7 @@ class AgentCore:
             )
 
     def _finish(self, result: RunResult, trace: list[AgentEvent]) -> RunResult:
-        with self._active_lock:
-            self._steering_open = False
+        self._close_steering()
         self._repository_call("finish_run", result.run_id, result.stop_reason.value, result.steps_used)
         return RunResult(
             result.final_response,
@@ -435,6 +468,7 @@ class AgentCore:
         emit,
         context_metadata: list[dict[str, object]] | None = None,
     ) -> RunResult:
+        self._close_steering()
         emit(EventKind.RUN_STOPPED, {"stop_reason": reason.value, "steps_used": steps})
         return self._finish(
             RunResult(None, reason, steps, run_id, context_metadata=tuple(context_metadata or ())),
@@ -454,6 +488,7 @@ class AgentCore:
         emit,
         context_metadata: list[dict[str, object]] | None = None,
     ) -> RunResult:
+        self._close_steering()
         error = RunError(code, message, error_type, step)
         emit(
             EventKind.RUN_ERROR,
@@ -465,6 +500,10 @@ class AgentCore:
             ),
             trace,
         )
+
+    def _close_steering(self) -> None:
+        with self._active_lock:
+            self._steering_open = False
 
     def _emit(
         self,
@@ -596,3 +635,12 @@ def _model_response(
         usage=usage,
         provider_cache_hit=provider_cache_hit,
     )
+
+
+def _provider_capabilities(model: ModelAdapter) -> ProviderCapabilities:
+    callback = getattr(model, "capabilities", None)
+    if callable(callback):
+        value = callback()
+        if isinstance(value, ProviderCapabilities):
+            return value
+    return ProviderCapabilities(streaming=callable(getattr(model, "stream", None)))

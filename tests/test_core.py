@@ -218,6 +218,29 @@ def test_concurrent_prompt_is_rejected_for_one_session() -> None:
     assert first_result[0].final_response == "done"
 
 
+def test_concurrent_stream_exposes_busy_error_event() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            started.set()
+            release.wait(timeout=2)
+            return ModelResponse(content="done")
+
+    core = AgentCore(SlowModel())
+    first = threading.Thread(target=lambda: core.prompt("first"))
+    first.start()
+    assert started.wait(timeout=2)
+    events = list(core.stream("second"))
+    release.set()
+    first.join(timeout=2)
+
+    assert len(events) == 1
+    assert events[0].kind is EventKind.RUN_ERROR
+    assert events[0].data["error"].code == "SESSION_BUSY"
+
+
 def test_registry_turns_unknown_tool_into_structured_result() -> None:
     result = ToolRegistry().execute(ToolCall("call-1", "missing", "{}"))
 
