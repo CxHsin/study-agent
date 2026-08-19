@@ -7,6 +7,7 @@ from minimal_agent.protocol import (
     ChatMessage,
     ModelError,
     ModelResponse,
+    ModelUsage,
     ProviderCapabilities,
     ToolCall,
 )
@@ -115,7 +116,16 @@ class AnthropicAdapter:
                     )
             if not text_parts and not calls:
                 raise ModelError("Anthropic returned neither text nor Tool Calls.")
-            return ModelResponse("".join(text_parts) or None, tuple(calls))
+            usage_data = getattr(response, "usage", None)
+            usage = (
+                ModelUsage(
+                    input_tokens=getattr(usage_data, "input_tokens", None),
+                    output_tokens=getattr(usage_data, "output_tokens", None),
+                )
+                if usage_data is not None
+                else None
+            )
+            return ModelResponse("".join(text_parts) or None, tuple(calls), usage=usage)
         except ModelError:
             raise
         except Exception as error:

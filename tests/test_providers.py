@@ -48,7 +48,8 @@ def test_anthropic_adapter_maps_text_and_tool_use() -> None:
         content=[
             SimpleNamespace(type="text", text="done"),
             SimpleNamespace(type="tool_use", id="c1", name="read", input={"path": "x"}),
-        ]
+        ],
+        usage=SimpleNamespace(input_tokens=5, output_tokens=2),
     )
     adapter = AnthropicAdapter("key", [], client=FakeAnthropic(response))
 
@@ -56,6 +57,7 @@ def test_anthropic_adapter_maps_text_and_tool_use() -> None:
 
     assert result.content == "done"
     assert result.tool_calls[0].arguments == '{"path":"x"}'
+    assert result.usage.input_tokens == 5
 
 
 def test_provider_messages_normalize_multi_turn_tool_history() -> None:

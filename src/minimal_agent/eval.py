@@ -55,6 +55,8 @@ class EvalExpectation:
     capabilities: tuple[str, ...] = ()
     usage_source: str | None = None
     cache_hit_source: str | None = None
+    steering_count: int | None = None
+    recovery_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,8 @@ class EvalCase:
             ),
             usage_source=_optional_str(raw_expectation.get("usage_source")),
             cache_hit_source=_optional_str(raw_expectation.get("cache_hit_source")),
+            steering_count=_optional_int(raw_expectation.get("steering_count")),
+            recovery_status=_optional_str(raw_expectation.get("recovery_status")),
         )
         case = cls(
             case_id,
@@ -285,6 +289,13 @@ class EvalRunner:
                 return _inconclusive(
                     case, result.error.message, calls=counter.calls, elapsed=started
                 )
+            if result.error is not None and result.error.error_type == "model_error":
+                return _inconclusive(
+                    case,
+                    f"provider_unavailable: {result.error.message}",
+                    calls=counter.calls,
+                    elapsed=started,
+                )
         except FuturesTimeoutError:
             return _inconclusive(case, "timeout", calls=counter.calls, elapsed=started)
         except EvalLimitError as error:
@@ -374,6 +385,24 @@ def _hard_rules(
                 "cache_hit_source",
                 actual == expected.cache_hit_source,
                 f"expected {expected.cache_hit_source}, got {actual}",
+            )
+        )
+    if expected.steering_count is not None:
+        actual = sum(event.kind.value == "steering_message_accepted" for event in result.events)
+        rules.append(
+            RuleResult(
+                "steering_count",
+                actual == expected.steering_count,
+                f"expected {expected.steering_count}, got {actual}",
+            )
+        )
+    if expected.recovery_status is not None:
+        actual = str(result.error.code if result.error else result.stop_reason.value)
+        rules.append(
+            RuleResult(
+                "recovery_status",
+                actual == expected.recovery_status,
+                f"expected {expected.recovery_status}, got {actual}",
             )
         )
     return rules
