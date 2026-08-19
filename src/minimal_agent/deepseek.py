@@ -60,6 +60,12 @@ class DeepSeekAdapter:
 
 def _to_sdk_message(message: ChatMessage) -> dict[str, object]:
     sdk_message = dict(message)
+    if message.get("role") == "context_summary":
+        sdk_message["role"] = "user"
+        sdk_message["content"] = "[Context summary of earlier conversation]\n" + str(
+            message["content"]
+        )
+        sdk_message.pop("summary_id", None)
     if message.get("role") == "assistant" and "tool_calls" in message:
         tool_calls = cast(Sequence[ToolCall], message["tool_calls"])
         sdk_message["tool_calls"] = [

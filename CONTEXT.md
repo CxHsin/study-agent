@@ -95,3 +95,23 @@ _Avoid_: Tool Choice, Prompt Instruction
 **Confirmation Policy**:
 The application callback that decides whether a Tool Call requiring human approval may execute.
 _Avoid_: Model consent, authorization
+
+**Context Window**:
+The provider-defined maximum model-facing token capacity for one completion, including the selected input messages and the reserved output budget.
+_Avoid_: Message limit, character limit
+
+**Context Builder**:
+The component that derives the model-facing context for a Run from the Session's complete Message History without changing that history by default.
+_Avoid_: Provider Adapter, Message History
+
+**Context Summary**:
+A model-facing representation of an explicitly covered range of older, closed Message History, carrying enough metadata to identify its scope and version.
+_Avoid_: Final Response, hidden prompt
+
+**Summarizer**:
+The independent model capability that produces a Context Summary from selected Message History; it is separate from the main Agent Loop decision.
+_Avoid_: Agent Loop, automatic retry
+
+**Compression Trigger**:
+The configured utilization ratio at which the Context Builder requests Context Summary generation before the next main model call.
+_Avoid_: Hard provider limit, truncation point
