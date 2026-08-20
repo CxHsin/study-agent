@@ -3,14 +3,18 @@ from __future__ import annotations
 import json
 import random
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import cast
 
 from minimal_agent.protocol import (
     ModelAdapter,
+    ModelProfile,
     ModelRequest,
     ModelResponse,
+    ModelStreamChunk,
+    ProviderCapabilities,
     ProviderError,
     ProviderErrorKind,
     ProviderStreamEvent,
@@ -54,6 +58,51 @@ class ProviderAttemptEvent:
 AttemptListener = Callable[[ProviderAttemptEvent], None]
 
 
+class LegacyModelAdapter:
+    """Translate the former in-process model shape into the Provider protocol."""
+
+    def __init__(self, model: object) -> None:
+        complete = getattr(model, "complete", None)
+        stream = getattr(model, "stream", None)
+        if not callable(complete) and not callable(stream):
+            raise TypeError("Model must provide complete() or stream().")
+        self._complete = complete if callable(complete) else None
+        self._stream = stream if callable(stream) else None
+        capabilities = _legacy_capabilities(model)
+        self.profile = ModelProfile(
+            "in_process",
+            type(model).__name__,
+            1_000_000,
+            1_000_000,
+            streaming=capabilities.streaming,
+            tool_calls=capabilities.tool_calls,
+            parallel_tool_calls=capabilities.parallel_tool_calls,
+            usage=capabilities.usage,
+            prompt_cache=capabilities.prompt_cache,
+            cancellation=capabilities.cancellation,
+        )
+
+    def stream(self, request: ModelRequest) -> Iterator[ProviderStreamEvent]:
+        try:
+            if self.profile.streaming and self._stream is not None:
+                yield from _legacy_chunk_events(self._stream(request.messages))
+                return
+            if self._complete is None:
+                yield StreamError(
+                    ProviderError(
+                        ProviderErrorKind.INVALID_REQUEST, "Model cannot complete requests."
+                    )
+                )
+                return
+            yield from _legacy_response_events(self._complete(request.messages))
+        except ProviderError as error:
+            yield StreamError(error)
+        except Exception as error:  # noqa: BLE001 - compatibility models expose their own failures
+            yield StreamError(
+                ProviderError(ProviderErrorKind.UNKNOWN, str(error) or type(error).__name__)
+            )
+
+
 class ProviderClient:
     def __init__(
         self,
@@ -63,6 +112,7 @@ class ProviderClient:
         attempt_timeout: float = 30.0,
         total_timeout: float = 60.0,
         on_attempt: AttemptListener | None = None,
+        report_attempts: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         random_value: Callable[[], float] = random.random,
@@ -75,6 +125,7 @@ class ProviderClient:
         self.attempt_timeout = attempt_timeout
         self.total_timeout = total_timeout
         self._on_attempt = on_attempt
+        self._report_attempts = report_attempts
         self._sleep = sleep
         self._monotonic = monotonic
         self._random = random_value
@@ -83,7 +134,7 @@ class ProviderClient:
     def model_name(self) -> str:
         return self.profile.model
 
-    def capabilities(self):
+    def capabilities(self) -> ProviderCapabilities:
         return self.profile.capabilities
 
     def complete(self, request: ModelRequest) -> ModelResponse:
@@ -95,7 +146,7 @@ class ProviderClient:
         self._validate(request)
         if request.options.stream and not self.profile.streaming:
             request = replace(request, options=replace(request.options, stream=False))
-        listener = on_attempt or self._on_attempt
+        listener = (on_attempt or self._on_attempt) if self._report_attempts else None
         started = self._monotonic()
         for attempt in range(1, self.retry_policy.max_attempts + 1):
             remaining = self.total_timeout - (self._monotonic() - started)
@@ -184,6 +235,16 @@ class ProviderClient:
             listener(event)
 
 
+def provider_client_for(model: object) -> ProviderClient:
+    if isinstance(model, ProviderClient):
+        return model
+    if isinstance(getattr(model, "profile", None), ModelProfile) and callable(
+        getattr(model, "stream", None)
+    ):
+        return ProviderClient(cast(ModelAdapter, model))
+    return ProviderClient(LegacyModelAdapter(model), report_attempts=False)
+
+
 def aggregate_stream(events) -> ModelResponse:
     content: list[str] = []
     calls: dict[str, dict[str, str]] = {}
@@ -237,6 +298,67 @@ def aggregate_stream(events) -> ModelResponse:
             "Provider returned neither text nor Tool Calls.",
         )
     return ModelResponse(text, tuple(tool_calls), usage, cache_hit)
+
+
+def _legacy_capabilities(model: object) -> ProviderCapabilities:
+    callback = getattr(model, "capabilities", None)
+    if callable(callback):
+        capabilities = callback()
+        if isinstance(capabilities, ProviderCapabilities):
+            return capabilities
+    return ProviderCapabilities(streaming=callable(getattr(model, "stream", None)))
+
+
+def _legacy_response_events(response: object) -> Iterator[ProviderStreamEvent]:
+    if not isinstance(response, ModelResponse):
+        yield StreamError(
+            ProviderError(ProviderErrorKind.INVALID_RESPONSE, "Model returned an invalid response.")
+        )
+        return
+    if response.content:
+        yield TextDelta(response.content)
+    for call in response.tool_calls:
+        try:
+            json.loads(call.arguments)
+            arguments = call.arguments
+        except json.JSONDecodeError:
+            arguments = json.dumps(call.arguments, ensure_ascii=False)
+        yield ToolCallDelta(call.id, call.name, arguments)
+    if response.usage is not None:
+        yield UsageUpdate(response.usage, response.provider_cache_hit)
+    yield StreamEnd()
+
+
+def _legacy_chunk_events(
+    chunks: Iterable[ModelStreamChunk],
+) -> Iterator[ProviderStreamEvent]:
+    ended = False
+    for chunk in chunks:
+        if not isinstance(chunk, ModelStreamChunk):
+            yield StreamError(
+                ProviderError(
+                    ProviderErrorKind.INVALID_RESPONSE,
+                    "Model returned an invalid stream chunk.",
+                )
+            )
+            return
+        if chunk.content_delta:
+            yield TextDelta(chunk.content_delta)
+        if chunk.tool_call_id is not None:
+            yield ToolCallDelta(chunk.tool_call_id, chunk.tool_name, chunk.arguments_delta)
+        if chunk.usage is not None:
+            yield UsageUpdate(chunk.usage, chunk.provider_cache_hit)
+        if chunk.done:
+            ended = True
+    if ended:
+        yield StreamEnd()
+    else:
+        yield StreamError(
+            ProviderError(
+                ProviderErrorKind.INVALID_RESPONSE,
+                "Model stream ended before completion.",
+            )
+        )
 
 
 def _with_timeout(request: ModelRequest, timeout: float) -> ModelRequest:

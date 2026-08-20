@@ -16,13 +16,12 @@ from typing import Any
 from minimal_agent.core import AgentCore, RunResult, StopReason
 from minimal_agent.events import EventKind
 from minimal_agent.protocol import (
-    ChatMessage,
     ModelAdapter,
     ModelRequest,
-    ModelStreamChunk,
     ProviderCapabilities,
     message_to_dict,
 )
+from minimal_agent.provider_client import ProviderClient, provider_client_for
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolRegistry
 
@@ -193,17 +192,15 @@ class _Budget:
     tokens: int = 0
 
 
-class _CountingModel:
-    def __init__(self, model: ModelAdapter, limits: EvalLimits, budget: _Budget) -> None:
-        self.model = model
+class _CountingClient(ProviderClient):
+    def __init__(self, client: ProviderClient, limits: EvalLimits, budget: _Budget) -> None:
+        self._client = client
+        self.profile = client.profile
         self.limits = limits
         self.budget = budget
         self.calls = 0
-        if hasattr(model, "profile"):
-            self.profile = model.profile
 
-    def complete(self, request: ModelRequest | Sequence[ChatMessage]):
-        messages = request.messages if isinstance(request, ModelRequest) else request
+    def stream(self, request: ModelRequest, *, on_attempt=None):
         if self.budget.calls >= self.limits.max_model_calls:
             raise EvalLimitError("max_model_calls exceeded")
         self.calls += 1
@@ -212,44 +209,14 @@ class _CountingModel:
             1,
             sum(
                 len(str(value))
-                for message in messages
+                for message in request.messages
                 for value in message_to_dict(message, include_version=False).values()
             )
             // 4,
         )
         if self.budget.tokens > self.limits.token_budget:
             raise EvalLimitError("token_budget exceeded")
-        return self.model.complete(request)
-
-    def capabilities(self) -> ProviderCapabilities:
-        callback = getattr(self.model, "capabilities", None)
-        if callable(callback):
-            return callback()
-        return ProviderCapabilities(streaming=callable(getattr(self.model, "stream", None)))
-
-    def stream(self, request: ModelRequest | Sequence[ChatMessage]):
-        messages = request.messages if isinstance(request, ModelRequest) else request
-        stream = getattr(self.model, "stream", None)
-        if not callable(stream):
-            response = self.complete(request)
-            yield ModelStreamChunk(content_delta=response.content, done=True)
-            return
-        if self.budget.calls >= self.limits.max_model_calls:
-            raise EvalLimitError("max_model_calls exceeded")
-        self.calls += 1
-        self.budget.calls += 1
-        self.budget.tokens += max(
-            1,
-            sum(
-                len(str(value))
-                for message in messages
-                for value in message_to_dict(message, include_version=False).values()
-            )
-            // 4,
-        )
-        if self.budget.tokens > self.limits.token_budget:
-            raise EvalLimitError("token_budget exceeded")
-        yield from stream(request)
+        yield from self._client.stream(request, on_attempt=on_attempt)
 
 
 class EvalLimitError(RuntimeError):
@@ -285,7 +252,9 @@ class EvalRunner:
     def _run_case(self, case: EvalCase, budget: _Budget) -> CaseEvaluation:
         started = time.perf_counter()
         try:
-            counter = _CountingModel(self._model_factory(case), self._limits, budget)
+            counter = _CountingClient(
+                provider_client_for(self._model_factory(case)), self._limits, budget
+            )
         except Exception as error:  # noqa: BLE001 - Provider setup failures are inconclusive.
             return _inconclusive(case, f"provider_unavailable: {error}", elapsed=started)
         try:
@@ -314,10 +283,8 @@ class EvalRunner:
                 result = future.result(timeout=self._limits.timeout_seconds)
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
-            if (
-                result.error is not None
-                and result.error.error_type == "internal_error"
-                and ("budget" in result.error.message or "max_model_calls" in result.error.message)
+            if result.error is not None and (
+                "budget" in result.error.message or "max_model_calls" in result.error.message
             ):
                 return _inconclusive(
                     case, result.error.message, calls=counter.calls, elapsed=started

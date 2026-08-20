@@ -11,7 +11,6 @@ from minimal_agent.protocol import (
     AssistantMessage,
     ChatMessage,
     ContextSummaryMessage,
-    ModelAdapter,
     ModelRequest,
     RequestOptions,
     SystemMessage,
@@ -70,7 +69,7 @@ class Summarizer(Protocol):
 class ModelSummarizer:
     """Uses a model through a separate, tool-free summarization decision."""
 
-    def __init__(self, model: ModelAdapter | ProviderClient | object) -> None:
+    def __init__(self, model: ProviderClient) -> None:
         self._model = model
 
     def summarize(self, messages: Sequence[ChatMessage]) -> str:
@@ -86,12 +85,9 @@ class ModelSummarizer:
             ),
             UserMessage(f"<conversation>\n{source}\n</conversation>"),
         )
-        if isinstance(self._model, ProviderClient):
-            response = self._model.complete(
-                ModelRequest(summary_messages, RequestOptions(tool_choice=ToolChoice.NONE))
-            )
-        else:
-            response = self._model.complete(summary_messages)
+        response = self._model.complete(
+            ModelRequest(summary_messages, RequestOptions(tool_choice=ToolChoice.NONE))
+        )
         if response.tool_calls or not response.content:
             raise ContextError("CONTEXT_SUMMARY_INVALID", "Summarizer did not return summary text.")
         return response.content

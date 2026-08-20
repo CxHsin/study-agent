@@ -1,4 +1,3 @@
-import json
 import queue
 import threading
 import time
@@ -19,22 +18,10 @@ from minimal_agent.persistence import (
     repository_adapters,
 )
 from minimal_agent.protocol import (
-    ChatMessage,
     ModelAdapter,
-    ModelProfile,
-    ModelRequest,
-    ModelResponse,
-    ModelStreamChunk,
-    ProviderCapabilities,
-    ProviderError,
-    ProviderErrorKind,
-    RequestOptions,
-    TextDelta,
-    ToolCall,
-    ToolCallDelta,
     UserMessage,
 )
-from minimal_agent.provider_client import ProviderClient, aggregate_stream
+from minimal_agent.provider_client import provider_client_for
 from minimal_agent.run import LoopOutcome, RunControl, RunError, RunResult, StopReason
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolRegistry
@@ -58,17 +45,18 @@ class AgentCore:
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive.")
-        self._model = model
+        self._model = provider_client_for(model)
         self._tools = tools or ToolRegistry()
         self._session = session or AgentSession()
         self._max_steps = max_steps
-        self._context_builder = context_builder or ContextBuilder(summarizer=ModelSummarizer(model))
-        profile = getattr(model, "profile", None)
-        if isinstance(profile, ModelProfile):
-            if self._context_builder.config.context_window_tokens > profile.context_window_tokens:
-                raise ValueError("ContextConfig exceeds the Model Profile context window.")
-            if self._context_builder.config.reserved_output_tokens > profile.max_output_tokens:
-                raise ValueError("ContextConfig output reserve exceeds the Model Profile limit.")
+        self._context_builder = context_builder or ContextBuilder(
+            summarizer=ModelSummarizer(self._model)
+        )
+        profile = self._model.profile
+        if self._context_builder.config.context_window_tokens > profile.context_window_tokens:
+            raise ValueError("ContextConfig exceeds the Model Profile context window.")
+        if self._context_builder.config.reserved_output_tokens > profile.max_output_tokens:
+            raise ValueError("ContextConfig output reserve exceeds the Model Profile limit.")
         adapters = repository_adapters(repository)
         self._sessions = session_repository or adapters.sessions
         self._runs = run_repository or adapters.runs
@@ -89,8 +77,6 @@ class AgentCore:
             tool_ledger=self._tool_ledger,
             cache_store=self._cache_store,
             apply_steering=self._apply_steering,
-            model_response=_model_response,
-            provider_capabilities=_provider_capabilities,
         )
 
     def subscribe(self, listener: AgentEventListener) -> None:
@@ -374,141 +360,3 @@ class AgentCore:
                     disabled_listeners,
                     event_sink,
                 )
-
-
-def _model_response(
-    model: ModelAdapter,
-    messages: tuple[ChatMessage, ...],
-    tool_definitions,
-    max_output_tokens: int,
-    emit: Callable[[EventKind, dict[str, object]], None],
-    step: int,
-) -> ModelResponse:
-    if isinstance(getattr(model, "profile", None), ModelProfile):
-        events = []
-
-        def attempt_event(event) -> None:
-            error = event.error
-            emit(
-                EventKind(event.kind.value),
-                {
-                    "step": step,
-                    "attempt": event.attempt,
-                    "error_kind": error.kind.value if error else None,
-                    "retryable": error.retryable if error else None,
-                    "delay_seconds": event.delay_seconds,
-                },
-            )
-
-        request = ModelRequest(
-            messages,
-            RequestOptions(
-                tools=tuple(tool_definitions),
-                max_output_tokens=max_output_tokens,
-            ),
-        )
-        stream = (
-            model.stream(request, on_attempt=attempt_event)
-            if isinstance(model, ProviderClient)
-            else model.stream(request)
-        )
-        for event in stream:
-            events.append(event)
-            if isinstance(event, TextDelta):
-                emit(EventKind.MODEL_CONTENT_DELTA, {"step": step, "content_delta": event.text})
-            elif isinstance(event, ToolCallDelta):
-                emit(
-                    EventKind.TOOL_CALL_DELTA,
-                    {
-                        "step": step,
-                        "tool_call_id": event.call_id,
-                        "name": event.name,
-                        "arguments_delta": event.arguments_delta,
-                    },
-                )
-        return aggregate_stream(events)
-    capabilities = getattr(model, "capabilities", None)
-    if callable(capabilities) and not capabilities().streaming:
-        return model.complete(messages)
-    stream = getattr(model, "stream", None)
-    if not callable(stream):
-        return model.complete(messages)
-
-    content_parts: list[str] = []
-    calls: dict[str, dict[str, str]] = {}
-    order: list[str] = []
-    usage = None
-    provider_cache_hit = None
-    completed = False
-    for chunk in stream(messages):
-        if not isinstance(chunk, ModelStreamChunk):
-            raise ProviderError(
-                ProviderErrorKind.INVALID_RESPONSE,
-                "Provider returned an invalid stream chunk.",
-            )
-        if chunk.usage is not None:
-            usage = chunk.usage
-        if chunk.provider_cache_hit is not None:
-            provider_cache_hit = chunk.provider_cache_hit
-        if chunk.done:
-            completed = True
-        if chunk.content_delta:
-            content_parts.append(chunk.content_delta)
-            emit(
-                EventKind.MODEL_CONTENT_DELTA,
-                {"step": step, "content_delta": chunk.content_delta},
-            )
-        if chunk.tool_call_id is not None:
-            if chunk.tool_call_id not in calls:
-                calls[chunk.tool_call_id] = {"name": chunk.tool_name or "", "arguments": ""}
-                order.append(chunk.tool_call_id)
-            call = calls[chunk.tool_call_id]
-            if chunk.tool_name:
-                call["name"] = chunk.tool_name
-            if chunk.arguments_delta:
-                call["arguments"] += chunk.arguments_delta
-            emit(
-                EventKind.TOOL_CALL_DELTA,
-                {
-                    "step": step,
-                    "tool_call_id": chunk.tool_call_id,
-                    "name": chunk.tool_name,
-                    "arguments_delta": chunk.arguments_delta,
-                },
-            )
-    if any(not calls[call_id]["name"] or not calls[call_id]["arguments"] for call_id in order):
-        raise ProviderError(
-            ProviderErrorKind.INVALID_RESPONSE,
-            "Provider returned an incomplete Tool Call.",
-        )
-    if not completed:
-        raise ProviderError(
-            ProviderErrorKind.INVALID_RESPONSE,
-            "Provider stream ended before completion.",
-        )
-    for call_id in order:
-        try:
-            json.loads(calls[call_id]["arguments"])
-        except json.JSONDecodeError as error:
-            raise ProviderError(
-                ProviderErrorKind.INVALID_RESPONSE,
-                "Provider returned malformed Tool Call arguments.",
-            ) from error
-    tool_calls = tuple(
-        ToolCall(call_id, calls[call_id]["name"], calls[call_id]["arguments"]) for call_id in order
-    )
-    return ModelResponse(
-        "".join(content_parts) or None,
-        tool_calls,
-        usage=usage,
-        provider_cache_hit=provider_cache_hit,
-    )
-
-
-def _provider_capabilities(model: ModelAdapter) -> ProviderCapabilities:
-    callback = getattr(model, "capabilities", None)
-    if callable(callback):
-        value = callback()
-        if isinstance(value, ProviderCapabilities):
-            return value
-    return ProviderCapabilities(streaming=callable(getattr(model, "stream", None)))

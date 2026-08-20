@@ -10,13 +10,16 @@ from minimal_agent.events import EventKind
 from minimal_agent.persistence import ToolExecutionRepository
 from minimal_agent.protocol import (
     AssistantMessage,
-    ModelAdapter,
+    ModelRequest,
     ModelResponse,
-    ProviderCapabilities,
     ProviderError,
+    RequestOptions,
+    TextDelta,
     ToolCall,
+    ToolCallDelta,
     ToolResultMessage,
 )
+from minimal_agent.provider_client import ProviderClient, aggregate_stream
 from minimal_agent.run import (
     LoopOutcome,
     LoopStateMachine,
@@ -29,8 +32,6 @@ from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolError, ToolRegistry, ToolResult
 
 Emit = Callable[[EventKind, dict[str, object]], None]
-ModelResponseFactory = Callable[..., ModelResponse]
-CapabilitiesFactory = Callable[[ModelAdapter], ProviderCapabilities]
 
 
 class AgentLoop:
@@ -39,7 +40,7 @@ class AgentLoop:
     def __init__(
         self,
         *,
-        model: ModelAdapter,
+        model: ProviderClient,
         tools: ToolRegistry,
         session: AgentSession,
         context_builder: ContextBuilder,
@@ -47,8 +48,6 @@ class AgentLoop:
         tool_ledger: ToolExecutionRepository | None,
         cache_store: PromptCacheStore,
         apply_steering: Callable[[str, int, Emit], None],
-        model_response: ModelResponseFactory,
-        provider_capabilities: CapabilitiesFactory,
     ) -> None:
         self._model = model
         self._tools = tools
@@ -58,8 +57,6 @@ class AgentLoop:
         self._tool_ledger = tool_ledger
         self._cache_store = cache_store
         self._apply_steering = apply_steering
-        self._model_response = model_response
-        self._provider_capabilities = provider_capabilities
 
     def use_session(self, session: AgentSession) -> None:
         self._session = session
@@ -109,7 +106,7 @@ class AgentLoop:
                         "estimator": self._context_builder.estimator.name,
                     }
                     context_metadata.append(metadata)
-                    response = self._model_response(
+                    response = _model_response(
                         self._model,
                         context.messages,
                         self._tools.definitions(),
@@ -117,7 +114,7 @@ class AgentLoop:
                         emit,
                         step,
                     )
-                    capabilities = self._provider_capabilities(self._model)
+                    capabilities = self._model.capabilities()
                     checkpoint = checkpoint_for(
                         context.messages,
                         session_id=self._session.session_id,
@@ -343,3 +340,51 @@ def _fingerprint(tool_call: ToolCall) -> str:
     except (TypeError, json.JSONDecodeError):
         arguments = tool_call.arguments.strip()
     return f"{tool_call.name}\0{arguments}"
+
+
+def _model_response(
+    model: ProviderClient,
+    messages,
+    tool_definitions,
+    max_output_tokens: int,
+    emit: Emit,
+    step: int,
+) -> ModelResponse:
+    events = []
+
+    def attempt_event(event) -> None:
+        error = event.error
+        emit(
+            EventKind(event.kind.value),
+            {
+                "step": step,
+                "attempt": event.attempt,
+                "error_kind": error.kind.value if error else None,
+                "retryable": error.retryable if error else None,
+                "delay_seconds": event.delay_seconds,
+            },
+        )
+
+    request = ModelRequest(
+        messages,
+        RequestOptions(
+            tools=tuple(tool_definitions),
+            max_output_tokens=max_output_tokens,
+        ),
+    )
+    streaming = model.capabilities().streaming
+    for event in model.stream(request, on_attempt=attempt_event):
+        events.append(event)
+        if streaming and isinstance(event, TextDelta):
+            emit(EventKind.MODEL_CONTENT_DELTA, {"step": step, "content_delta": event.text})
+        elif streaming and isinstance(event, ToolCallDelta):
+            emit(
+                EventKind.TOOL_CALL_DELTA,
+                {
+                    "step": step,
+                    "tool_call_id": event.call_id,
+                    "name": event.name,
+                    "arguments_delta": event.arguments_delta,
+                },
+            )
+    return aggregate_stream(events)

@@ -1,6 +1,7 @@
 from minimal_agent.protocol import (
     ModelProfile,
     ModelRequest,
+    ModelResponse,
     ProviderError,
     ProviderErrorKind,
     RequestOptions,
@@ -10,7 +11,12 @@ from minimal_agent.protocol import (
     ToolDefinition,
     UserMessage,
 )
-from minimal_agent.provider_client import ProviderAttemptKind, ProviderClient, RetryPolicy
+from minimal_agent.provider_client import (
+    ProviderAttemptKind,
+    ProviderClient,
+    RetryPolicy,
+    provider_client_for,
+)
 
 
 class ScriptedAdapter:
@@ -104,3 +110,24 @@ def test_tool_calls_fail_when_profile_does_not_support_them() -> None:
         assert error.kind is ProviderErrorKind.UNSUPPORTED_CAPABILITY
     else:
         raise AssertionError("Expected unsupported Tool Calls to fail")
+
+
+def test_provider_client_for_contains_legacy_model_compatibility() -> None:
+    class LegacyModel:
+        def __init__(self) -> None:
+            self.messages = None
+
+        def complete(self, messages):
+            self.messages = messages
+            return ModelResponse(content="done")
+
+    model = LegacyModel()
+    client = provider_client_for(model)
+    request = ModelRequest((UserMessage("hello"),))
+
+    response = client.complete(request)
+
+    assert response.content == "done"
+    assert model.messages == request.messages
+    assert client.capabilities().streaming is False
+    assert provider_client_for(client) is client
