@@ -162,13 +162,15 @@ class AgentCore:
     def stream(self, user_input: str, control: RunControl | None = None) -> Iterator[AgentEvent]:
         """Yield the same ordered events produced by a synchronous prompt run."""
         control = control or RunControl()
-        events: queue.Queue[AgentEvent | object] = queue.Queue()
+        events: queue.Queue[AgentEvent | Exception | object] = queue.Queue()
         finished = object()
         completed = False
 
         def run() -> None:
             try:
                 self._execute_prompt(user_input, control, event_sink=events.put)
+            except Exception as error:  # noqa: BLE001 - the iterator re-raises worker failures
+                events.put(error)
             finally:
                 events.put(finished)
 
@@ -179,6 +181,8 @@ class AgentCore:
                 if event is finished:
                     completed = True
                     return
+                if isinstance(event, Exception):
+                    raise event
                 yield event  # type narrowing is not available for the sentinel union
         finally:
             if not completed:

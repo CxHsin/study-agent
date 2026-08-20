@@ -183,6 +183,35 @@ def test_eval_case_can_drive_follow_up_messages() -> None:
     assert report.cases[0].run.final_response == "followed"
 
 
+def test_eval_steering_is_not_replayed_during_follow_up() -> None:
+    class SteeringThenFollowUp:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            self.calls += 1
+            steering_count = sum(
+                message.get("role") == "user" and message.get("content") == "add detail"
+                for message in messages
+            )
+            assert steering_count == 1
+            return ModelResponse(content="initial" if self.calls == 1 else "followed")
+
+    case = EvalCase.from_mapping(
+        {
+            "case_id": "steer-follow-up",
+            "prompt": "first",
+            "steering_messages": ["add detail"],
+            "follow_up_messages": ["second"],
+            "expectation": {"final_text": {"exact": "followed"}},
+        }
+    )
+
+    report = EvalRunner(lambda _: SteeringThenFollowUp()).run([case])
+
+    assert report.status == "passed"
+
+
 def test_provider_exception_is_inconclusive_and_artifact_is_redacted(tmp_path) -> None:
     case = EvalCase.from_mapping(
         {

@@ -302,7 +302,9 @@ class EvalRunner:
 
             def drive_steering(event) -> None:
                 if event.kind is EventKind.RUN_STARTED:
-                    for message in pending_steering:
+                    messages = tuple(pending_steering)
+                    pending_steering.clear()
+                    for message in messages:
                         core.steer(message)
 
             core.subscribe(drive_steering)

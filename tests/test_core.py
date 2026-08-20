@@ -571,6 +571,23 @@ def test_repository_failure_does_not_leave_session_busy() -> None:
             raise AssertionError("Repository failure should remain visible to the caller")
 
 
+def test_stream_propagates_repository_failure() -> None:
+    class FinalModel:
+        def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
+            return ModelResponse(content="done")
+
+    class BrokenRepository:
+        def start_run(self, *args, **kwargs) -> None:
+            raise OSError("disk unavailable")
+
+    try:
+        list(AgentCore(FinalModel(), repository=BrokenRepository()).stream("prompt"))
+    except OSError as error:
+        assert str(error) == "disk unavailable"
+    else:
+        raise AssertionError("Streaming callers must observe repository failures")
+
+
 def test_repeated_context_reports_local_checkpoint_hit() -> None:
     class FinalModel:
         def complete(self, messages: Sequence[ChatMessage]) -> ModelResponse:
