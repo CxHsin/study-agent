@@ -39,6 +39,8 @@ from minimal_agent.run import LoopOutcome, RunControl, RunError, RunResult, Stop
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolRegistry
 
+STREAM_CANCEL_JOIN_SECONDS = 0.25
+
 
 class AgentCore:
     def __init__(
@@ -150,7 +152,8 @@ class AgentCore:
             finally:
                 events.put(finished)
 
-        threading.Thread(target=run, name="minimal-agent-stream", daemon=True).start()
+        worker = threading.Thread(target=run, name="minimal-agent-stream", daemon=True)
+        worker.start()
         try:
             while True:
                 event = events.get()
@@ -163,6 +166,9 @@ class AgentCore:
         finally:
             if not completed:
                 control.cancel()
+                worker.join(timeout=STREAM_CANCEL_JOIN_SECONDS)
+            else:
+                worker.join()
 
     def _execute_prompt(
         self,

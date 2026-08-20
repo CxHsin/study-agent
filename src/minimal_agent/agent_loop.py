@@ -243,7 +243,19 @@ class AgentLoop:
                             idempotent=definition.idempotent if definition else False,
                         )
                     tool_result = self._tools.execute(
-                        tool_call, run_id=run_id, user_input=user_input, control=control
+                        tool_call,
+                        run_id=run_id,
+                        user_input=user_input,
+                        control=control,
+                        on_confirmation_requested=lambda context: emit(
+                            EventKind.TOOL_CONFIRMATION_REQUESTED,
+                            {
+                                "run_id": context.run_id,
+                                "tool_call_id": context.tool_call.id,
+                                "name": context.tool_call.name,
+                                "arguments": context.arguments,
+                            },
+                        ),
                     )
                     if self._tool_ledger is not None:
                         self._tool_ledger.record_tool(

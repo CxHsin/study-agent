@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore, RunControl, StopReason
@@ -99,6 +100,31 @@ def test_completed_stream_does_not_cancel_caller_control() -> None:
         is EventKind.FINAL_RESPONSE
     )
     assert control.stop_reason is None
+
+
+def test_closing_stream_bounds_wait_and_keeps_session_exclusive() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowModel:
+        def complete(self, _messages):
+            started.set()
+            release.wait(timeout=2)
+            return ModelResponse(content="done")
+
+    core = AgentCore(SlowModel())
+    events = core.stream("first")
+    assert next(events).kind is EventKind.RUN_STARTED
+    assert started.wait(timeout=1)
+
+    before = time.monotonic()
+    events.close()
+    elapsed = time.monotonic() - before
+    busy = core.prompt("second")
+    release.set()
+
+    assert elapsed < 1
+    assert busy.error is not None and busy.error.code == "SESSION_BUSY"
 
 
 def test_stream_buffers_tool_call_fragments_before_execution() -> None:

@@ -17,6 +17,7 @@ class EventKind(StrEnum):
     TOOL_CALL_DELTA = "tool_call_delta"
     STEERING_MESSAGE_ACCEPTED = "steering_message_accepted"
     TOOL_CALL_REQUESTED = "tool_call_requested"
+    TOOL_CONFIRMATION_REQUESTED = "tool_confirmation_requested"
     TOOL_RESULT_PRODUCED = "tool_result_produced"
     FINAL_RESPONSE = "final_response"
     RUN_STOPPED = "run_stopped"

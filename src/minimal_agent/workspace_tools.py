@@ -52,6 +52,35 @@ class WorkspaceTools:
                 "strict": False,
             },
             {
+                "name": "write_file",
+                "description": "Create or replace a UTF-8 text file in the Agent Workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "name": "edit_file",
+                "description": "Replace one exact text occurrence in a UTF-8 Workspace file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "minLength": 1},
+                        "old_text": {"type": "string", "minLength": 1},
+                        "new_text": {"type": "string"},
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
                 "name": "bash",
                 "description": "Run one Bash command in the Agent Workspace after confirmation.",
                 "parameters": {
@@ -68,22 +97,37 @@ class WorkspaceTools:
         )
 
     def registry(self) -> ToolRegistry:
-        definitions = self.definitions()
+        definitions = {str(item["name"]): item for item in self.definitions()}
         return ToolRegistry(
             [
                 ToolDefinition(
                     "read_file",
-                    str(definitions[0]["description"]),
-                    definitions[0]["parameters"],
+                    str(definitions["read_file"]["description"]),
+                    definitions["read_file"]["parameters"],
                     self._read_file,
                     read_only=True,
                     idempotent=True,
                     strict=False,
                 ),
                 ToolDefinition(
+                    "write_file",
+                    str(definitions["write_file"]["description"]),
+                    definitions["write_file"]["parameters"],
+                    self._write_file,
+                    idempotent=True,
+                    requires_confirmation=True,
+                ),
+                ToolDefinition(
+                    "edit_file",
+                    str(definitions["edit_file"]["description"]),
+                    definitions["edit_file"]["parameters"],
+                    self._edit_file,
+                    requires_confirmation=True,
+                ),
+                ToolDefinition(
                     "bash",
-                    str(definitions[1]["description"]),
-                    definitions[1]["parameters"],
+                    str(definitions["bash"]["description"]),
+                    definitions["bash"]["parameters"],
                     self._bash,
                     requires_confirmation=True,
                     strict=False,
@@ -98,20 +142,7 @@ class WorkspaceTools:
         if not isinstance(requested, str):
             raise ToolError("INVALID_ARGUMENTS", "Path must be a string.")
         path = self._resolve_path(requested)
-        if not path.exists():
-            raise ToolError("FILE_NOT_FOUND", f"File does not exist: {requested}")
-        if not path.is_file():
-            raise ToolError("NOT_A_FILE", f"Path is not a file: {requested}")
-        if path.stat().st_size > MAX_FILE_SIZE_BYTES:
-            raise ToolError("FILE_TOO_LARGE", f"File exceeds the size limit: {requested}")
-        try:
-            content = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as error:
-            raise ToolError(
-                "NOT_UTF8_TEXT", f"File is not valid UTF-8 text: {requested}"
-            ) from error
-        except OSError as error:
-            raise ToolError("FILE_READ_ERROR", f"Could not read file: {requested}") from error
+        content = self._read_text_file(path, requested)
         start, end = arguments.get("start_line"), arguments.get("end_line")
         if start is not None or end is not None:
             lines = content.splitlines(keepends=True)
@@ -120,6 +151,70 @@ class WorkspaceTools:
                 raise ToolError("INVALID_ARGUMENTS", "end_line must be >= start_line.")
             content = "".join(lines[first:last])
         return {"path": requested, "content": content}
+
+    def _write_file(self, arguments: Mapping[str, object]) -> object:
+        requested = arguments["path"]
+        content = arguments["content"]
+        if not isinstance(requested, str) or not isinstance(content, str):
+            raise ToolError("INVALID_ARGUMENTS", "Path and content must be strings.")
+        path = self._resolve_path(requested)
+        if path.exists() and not path.is_file():
+            raise ToolError("NOT_A_FILE", f"Path is not a file: {requested}")
+        created = not path.exists()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise ToolError("FILE_WRITE_ERROR", f"Could not write file: {requested}") from error
+        written = self._write_text_file(path, requested, content)
+        return {"path": requested, "bytes_written": written, "created": created}
+
+    def _edit_file(self, arguments: Mapping[str, object]) -> object:
+        requested = arguments["path"]
+        old_text = arguments["old_text"]
+        new_text = arguments["new_text"]
+        if not all(isinstance(value, str) for value in (requested, old_text, new_text)):
+            raise ToolError("INVALID_ARGUMENTS", "Path and edit text must be strings.")
+        assert isinstance(requested, str)
+        assert isinstance(old_text, str)
+        assert isinstance(new_text, str)
+        if not old_text:
+            raise ToolError("INVALID_ARGUMENTS", "old_text must not be empty.")
+        path = self._resolve_path(requested)
+        content = self._read_text_file(path, requested)
+        occurrences = content.count(old_text)
+        if occurrences == 0:
+            raise ToolError("TEXT_NOT_FOUND", "old_text was not found in the file.")
+        if occurrences > 1:
+            raise ToolError("TEXT_NOT_UNIQUE", "old_text occurs more than once in the file.")
+        updated = content.replace(old_text, new_text, 1)
+        written = self._write_text_file(path, requested, updated)
+        return {"path": requested, "replacements": 1, "bytes_written": written}
+
+    def _read_text_file(self, path: Path, requested: str) -> str:
+        if not path.exists():
+            raise ToolError("FILE_NOT_FOUND", f"File does not exist: {requested}")
+        if not path.is_file():
+            raise ToolError("NOT_A_FILE", f"Path is not a file: {requested}")
+        if path.stat().st_size > MAX_FILE_SIZE_BYTES:
+            raise ToolError("FILE_TOO_LARGE", f"File exceeds the size limit: {requested}")
+        try:
+            return path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise ToolError(
+                "NOT_UTF8_TEXT", f"File is not valid UTF-8 text: {requested}"
+            ) from error
+        except OSError as error:
+            raise ToolError("FILE_READ_ERROR", f"Could not read file: {requested}") from error
+
+    def _write_text_file(self, path: Path, requested: str, content: str) -> int:
+        encoded = content.encode("utf-8")
+        if len(encoded) > MAX_FILE_SIZE_BYTES:
+            raise ToolError("FILE_TOO_LARGE", f"File exceeds the size limit: {requested}")
+        try:
+            path.write_text(content, encoding="utf-8")
+        except OSError as error:
+            raise ToolError("FILE_WRITE_ERROR", f"Could not write file: {requested}") from error
+        return len(encoded)
 
     def _bash(self, arguments: Mapping[str, object], control: object | None = None) -> object:
         command = arguments["command"]

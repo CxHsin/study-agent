@@ -3,12 +3,13 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from threading import Condition
 
 from dotenv import load_dotenv
 
 from minimal_agent.core import AgentCore
 from minimal_agent.deepseek import DeepSeekAdapter
-from minimal_agent.events import AgentEvent
+from minimal_agent.events import AgentEvent, EventKind
 from minimal_agent.persistence import SQLiteRepository
 from minimal_agent.provider_client import ProviderClient
 from minimal_agent.workspace_tools import WorkspaceTools
@@ -20,10 +21,82 @@ class ConfigurationError(RuntimeError):
     pass
 
 
+class ConsoleConfirmation:
+    def __init__(
+        self,
+        input_fn: Callable[[str], str] = input,
+        output_fn: Callable[[str], None] = print,
+        *,
+        coordinated: bool = False,
+    ) -> None:
+        self._input = input_fn
+        self._output = output_fn
+        self._coordinated = coordinated
+        self._condition = Condition()
+        self._decisions: dict[tuple[str, str], bool] = {}
+
+    def confirm(self, context) -> bool:
+        if self._coordinated:
+            key = (context.run_id, context.tool_call.id)
+            with self._condition:
+                self._condition.wait_for(lambda: key in self._decisions)
+                return self._decisions.pop(key)
+        return self._prompt(context.tool_call.name, context.arguments)
+
+    def prompt_and_resolve(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: object,
+        input_fn: Callable[[str], str],
+        output_fn: Callable[[str], None],
+    ) -> bool:
+        try:
+            allowed = _ask_confirmation(name, arguments, input_fn, output_fn)
+        except EOFError:
+            allowed = False
+            self.resolve(run_id, call_id, allowed)
+            return allowed
+        except KeyboardInterrupt:
+            self.resolve(run_id, call_id, False)
+            raise
+        self.resolve(run_id, call_id, allowed)
+        return allowed
+
+    def resolve(self, run_id: str, call_id: str, allowed: bool) -> None:
+        with self._condition:
+            self._decisions[(run_id, call_id)] = allowed
+            self._condition.notify_all()
+
+    def _prompt(self, name: str, arguments: object) -> bool:
+        try:
+            return _ask_confirmation(name, arguments, self._input, self._output)
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+
+def _ask_confirmation(
+    name: str,
+    arguments: object,
+    input_fn: Callable[[str], str],
+    output_fn: Callable[[str], None],
+) -> bool:
+    rendered = (
+        arguments
+        if isinstance(arguments, str)
+        else json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    )
+    output_fn(f"Confirm> {name} {rendered}")
+    return input_fn("Allow? [y/N] ").strip().lower() in {"y", "yes"}
+
+
 def run_console(
     core: AgentCore,
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[[str], None] = print,
+    *,
+    confirmation: ConsoleConfirmation | None = None,
 ) -> int:
     events: list[AgentEvent] = []
     core.subscribe(events.append)
@@ -47,17 +120,37 @@ def run_console(
             continue
 
         events.clear()
+        streamed_content = False
         try:
-            result = core.prompt(user_input)
+            for event in core.stream(user_input):
+                if event.kind is EventKind.MODEL_CONTENT_DELTA:
+                    streamed_content = True
+                    output_fn(f"Agent> {event.data['content_delta']}")
+                elif event.kind is EventKind.TOOL_CALL_REQUESTED:
+                    output_fn(f"Tool> {event.data['name']} {event.data['arguments']}")
+                elif event.kind is EventKind.TOOL_CONFIRMATION_REQUESTED:
+                    if confirmation is not None:
+                        confirmation.prompt_and_resolve(
+                            str(event.data["run_id"]),
+                            str(event.data["tool_call_id"]),
+                            str(event.data["name"]),
+                            event.data["arguments"],
+                            input_fn,
+                            output_fn,
+                        )
+                elif event.kind is EventKind.TOOL_RESULT_PRODUCED:
+                    status = "ok" if event.data["success"] else "failed"
+                    output_fn(f"Tool> {event.data['name']} {status}")
+                elif event.kind is EventKind.FINAL_RESPONSE and not streamed_content:
+                    output_fn(f"Agent> {event.data['content']}")
+                elif event.kind in {EventKind.RUN_STOPPED, EventKind.RUN_ERROR}:
+                    output_fn(f"Agent> Task stopped: {event.data['stop_reason']}")
         except KeyboardInterrupt:
-            return 0
-        if result.stop_reason.value == "final":
-            output_fn(f"Agent> {result.final_response or ''}")
-        else:
-            output_fn(f"Agent> Task stopped: {result.stop_reason.value}")
+            output_fn("Agent> Run cancelled.")
+            continue
 
 
-def create_core() -> AgentCore:
+def create_core(confirmation: ConsoleConfirmation | None = None) -> AgentCore:
     load_dotenv(PROJECT_ROOT / ".env")
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if api_key is None or not api_key.strip():
@@ -65,7 +158,7 @@ def create_core() -> AgentCore:
 
     workspace = PROJECT_ROOT / "workspace"
     workspace.mkdir(exist_ok=True)
-    tools = WorkspaceTools(workspace).registry()
+    tools = WorkspaceTools(workspace, confirmation=confirmation or ConsoleConfirmation()).registry()
     model = ProviderClient(DeepSeekAdapter(api_key=api_key))
     storage = PROJECT_ROOT / ".minimal-agent"
     storage.mkdir(exist_ok=True)
@@ -100,9 +193,10 @@ def _display_last_trace(events: list[AgentEvent], output_fn: Callable[[str], Non
 
 
 def main() -> int:
+    confirmation = ConsoleConfirmation(coordinated=True)
     try:
-        core = create_core()
+        core = create_core(confirmation)
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 1
-    return run_console(core)
+    return run_console(core, confirmation=confirmation)

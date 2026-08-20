@@ -113,6 +113,7 @@ class ToolRegistry:
         run_id: str = "",
         user_input: str = "",
         control: object | None = None,
+        on_confirmation_requested: Callable[[ToolExecutionContext], None] | None = None,
     ) -> ToolResult:
         definition = self._definitions.get(tool_call.name)
         if definition is None:
@@ -133,6 +134,8 @@ class ToolRegistry:
             if self._confirmation is None:
                 return _failure(tool_call, "PERMISSION_DENIED", "Tool confirmation is required.")
             try:
+                if on_confirmation_requested is not None:
+                    on_confirmation_requested(context)
                 confirmed = self._confirmation.confirm(context)
             except Exception as error:  # noqa: BLE001 - confirmation is a safety boundary
                 return _failure(

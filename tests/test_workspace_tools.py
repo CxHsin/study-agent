@@ -33,6 +33,53 @@ def test_read_file_rejects_workspace_escape_and_non_utf8(tmp_path):
     assert call(registry, "read_file", {"path": "bad.bin"}).error.code == "NOT_UTF8_TEXT"
 
 
+def test_write_and_edit_file_complete_a_confirmed_change(tmp_path):
+    registry = WorkspaceTools(tmp_path, confirmation=Confirm()).registry()
+
+    written = call(
+        registry,
+        "write_file",
+        {"path": "src/example.py", "content": "value = 1\n"},
+    )
+    edited = call(
+        registry,
+        "edit_file",
+        {"path": "src/example.py", "old_text": "1", "new_text": "2"},
+    )
+
+    assert written.ok and written.data["created"] is True
+    assert edited.ok and edited.data["replacements"] == 1
+    assert (tmp_path / "src" / "example.py").read_text(encoding="utf-8") == "value = 2\n"
+
+
+def test_edit_file_requires_one_exact_occurrence(tmp_path):
+    (tmp_path / "notes.txt").write_text("same same", encoding="utf-8")
+    registry = WorkspaceTools(tmp_path, confirmation=Confirm()).registry()
+
+    missing = call(
+        registry,
+        "edit_file",
+        {"path": "notes.txt", "old_text": "absent", "new_text": "new"},
+    )
+    repeated = call(
+        registry,
+        "edit_file",
+        {"path": "notes.txt", "old_text": "same", "new_text": "new"},
+    )
+
+    assert missing.error.code == "TEXT_NOT_FOUND"
+    assert repeated.error.code == "TEXT_NOT_UNIQUE"
+
+
+def test_write_and_edit_require_confirmation(tmp_path):
+    registry = WorkspaceTools(tmp_path).registry()
+
+    result = call(registry, "write_file", {"path": "new.txt", "content": "content"})
+
+    assert result.error.code == "PERMISSION_DENIED"
+    assert not (tmp_path / "new.txt").exists()
+
+
 def test_bash_requires_confirmation_and_returns_process_data(tmp_path):
     denied = call(WorkspaceTools(tmp_path).registry(), "bash", {"command": "printf ok"})
     assert denied.error.code == "PERMISSION_DENIED"
