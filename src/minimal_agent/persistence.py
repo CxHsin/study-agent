@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from minimal_agent.cost import UsageRecord
+
 if TYPE_CHECKING:
     from minimal_agent.recovery import ContinuationRun
 
@@ -51,6 +53,10 @@ class RunRepository(Protocol):
     ) -> None: ...
 
     def finish_run(self, run_id: str, stop_reason: str, steps_used: int) -> None: ...
+
+    def record_usage(self, run_id: str, usage: UsageRecord) -> None: ...
+
+    def usage(self, run_id: str) -> tuple[UsageRecord, ...]: ...
 
     def continuation_session(
         self, run_id: str
@@ -250,6 +256,15 @@ class SQLiteRepository:
                     sequence INTEGER NOT NULL, kind TEXT NOT NULL, data_json TEXT NOT NULL,
                     format_version INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS model_usages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL, call_id TEXT NOT NULL UNIQUE,
+                    step INTEGER NOT NULL, purpose TEXT NOT NULL,
+                    status TEXT NOT NULL, error_code TEXT,
+                    input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER,
+                    latency_ms REAL, cost REAL, source TEXT NOT NULL,
+                    cache_hit_source TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS tool_executions (
                     run_id TEXT NOT NULL, call_id TEXT NOT NULL, name TEXT NOT NULL,
                     arguments TEXT NOT NULL, status TEXT NOT NULL, result_json TEXT,
@@ -409,6 +424,56 @@ class SQLiteRepository:
                 "UPDATE runs SET status='finished', stop_reason=?, steps_used=?, ended_at=? WHERE run_id=?",
                 (stop_reason, steps_used, datetime.now(UTC).isoformat(), run_id),
             )
+
+    def record_usage(self, run_id: str, usage: UsageRecord) -> None:
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO model_usages(
+                    run_id, call_id, step, purpose, status, error_code,
+                    input_tokens, output_tokens, cached_tokens,
+                    latency_ms, cost, source, cache_hit_source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(call_id) DO UPDATE SET
+                    step=excluded.step,
+                    purpose=excluded.purpose,
+                    status=excluded.status,
+                    error_code=excluded.error_code,
+                    input_tokens=excluded.input_tokens,
+                    output_tokens=excluded.output_tokens,
+                    cached_tokens=excluded.cached_tokens,
+                    latency_ms=excluded.latency_ms,
+                    cost=excluded.cost,
+                    source=excluded.source,
+                    cache_hit_source=excluded.cache_hit_source
+                """,
+                (
+                    run_id,
+                    usage.call_id,
+                    usage.step,
+                    usage.purpose.value,
+                    usage.status.value,
+                    usage.error_code,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cached_tokens,
+                    usage.latency_ms,
+                    usage.cost,
+                    usage.source,
+                    usage.cache_hit_source,
+                ),
+            )
+
+    def usage(self, run_id: str) -> tuple[UsageRecord, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT input_tokens, output_tokens, cached_tokens, latency_ms, cost,
+                   source, cache_hit_source, step, call_id, purpose, status, error_code
+            FROM model_usages WHERE run_id=? ORDER BY id
+            """,
+            (run_id,),
+        ).fetchall()
+        return tuple(UsageRecord(*row) for row in rows)
 
     def record_tool(
         self,
@@ -658,6 +723,12 @@ class SQLiteRunRepository:
 
     def finish_run(self, run_id: str, stop_reason: str, steps_used: int) -> None:
         self._backend.finish_run(run_id, stop_reason, steps_used)
+
+    def record_usage(self, run_id: str, usage: UsageRecord) -> None:
+        self._backend.record_usage(run_id, usage)
+
+    def usage(self, run_id: str) -> tuple[UsageRecord, ...]:
+        return self._backend.usage(run_id)
 
     def continuation_session(
         self, run_id: str

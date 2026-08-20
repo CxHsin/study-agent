@@ -8,6 +8,7 @@ from minimal_agent.context import (
     ModelSummarizer,
 )
 from minimal_agent.core import AgentCore, StopReason
+from minimal_agent.cost import ModelCallPurpose, UsageStatus
 from minimal_agent.protocol import (
     ChatMessage,
     ContextSummaryMessage,
@@ -126,6 +127,48 @@ def test_model_summarizer_requires_structured_json() -> None:
     assert sections.objective == "Ship"
     assert sections.next_steps == ("Edit",)
     assert adapter.request.options.tools == ()
+
+
+def test_compaction_and_primary_model_calls_have_distinct_usage_records() -> None:
+    class SummaryThenAnswerAdapter:
+        profile = ModelProfile("test", "summary-and-agent", 150, 10)
+
+        def stream(self, request):
+            if "Summarize the delimited conversation" in request.messages[0].content:
+                yield TextDelta(
+                    '{"objective":"Ship","constraints":[],"progress":[],"files":[],'
+                    '"next_steps":["Continue"],"facts":[]}'
+                )
+            else:
+                yield TextDelta("done")
+            yield StreamEnd()
+
+    client = ProviderClient(SummaryThenAnswerAdapter())
+    builder = ContextBuilder(
+        ContextConfig(
+            context_window_tokens=150,
+            reserved_output_tokens=10,
+            compression_trigger_ratio=0.5,
+            keep_recent_messages=1,
+            max_compression_passes=1,
+        ),
+        summarizer=ModelSummarizer(client),
+    )
+    session = AgentSession(
+        (UserMessage("old " * 80), UserMessage("recent")),
+    )
+
+    result = AgentCore(client, session=session, context_builder=builder).prompt("finish")
+
+    usage = result.trace.usage()
+    assert result.final_response == "done"
+    assert [item.purpose for item in usage] == [
+        ModelCallPurpose.CONTEXT_SUMMARY,
+        ModelCallPurpose.AGENT,
+    ]
+    assert [item.step for item in usage] == [1, 1]
+    assert len({item.call_id for item in usage}) == 2
+    assert all(item.status is UsageStatus.SUCCEEDED for item in usage)
 
 
 def test_core_reports_context_error_without_calling_model() -> None:

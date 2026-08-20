@@ -1,10 +1,10 @@
 """Run outcomes and cooperative control shared by Agent and AgentLoop."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import ClassVar
 
-from minimal_agent.events import AgentEvent
+from minimal_agent.events import AgentEvent, Trace
 
 
 class StopReason(StrEnum):
@@ -75,8 +75,13 @@ class RunResult:
     steps_used: int
     run_id: str
     error: RunError | None = None
-    events: tuple[AgentEvent, ...] = ()
+    trace: Trace = field(default_factory=Trace)
     context_metadata: tuple[dict[str, object], ...] = ()
+
+    @property
+    def events(self) -> tuple[AgentEvent, ...]:
+        """Compatibility view for callers that have not migrated to Trace."""
+        return self.trace.events
 
 
 @dataclass(frozen=True)

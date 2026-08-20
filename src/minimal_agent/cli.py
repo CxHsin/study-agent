@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from minimal_agent.core import AgentCore
 from minimal_agent.deepseek import DeepSeekAdapter
-from minimal_agent.events import AgentEvent, EventKind
+from minimal_agent.events import AgentEvent, EventKind, Trace
 from minimal_agent.persistence import SQLiteRepository
 from minimal_agent.provider_client import ProviderClient
 from minimal_agent.recovery import RecoveryCoordinator, RecoveryPlan
@@ -134,26 +134,31 @@ def run_console(
             for event in core.stream(user_input):
                 if event.kind is EventKind.MODEL_CONTENT_DELTA:
                     streamed_content = True
-                    output_fn(f"Agent> {event.data['content_delta']}")
+                    output_fn(f"Agent> {event.content_delta()}")
                 elif event.kind is EventKind.TOOL_CALL_REQUESTED:
-                    output_fn(f"Tool> {event.data['name']} {event.data['arguments']}")
+                    tool_call = event.tool_call()
+                    if tool_call is not None:
+                        output_fn(f"Tool> {tool_call.name} {tool_call.raw_arguments}")
                 elif event.kind is EventKind.TOOL_CONFIRMATION_REQUESTED:
-                    if confirmation is not None:
+                    request = event.confirmation_request()
+                    if confirmation is not None and request is not None:
                         confirmation.prompt_and_resolve(
-                            str(event.data["run_id"]),
-                            str(event.data["tool_call_id"]),
-                            str(event.data["name"]),
-                            event.data["arguments"],
+                            request.run_id,
+                            request.tool_call_id,
+                            request.name,
+                            dict(request.arguments),
                             input_fn,
                             output_fn,
                         )
                 elif event.kind is EventKind.TOOL_RESULT_PRODUCED:
-                    status = "ok" if event.data["success"] else "failed"
-                    output_fn(f"Tool> {event.data['name']} {status}")
+                    result = event.tool_result()
+                    if result is not None:
+                        status = "ok" if result.success else "failed"
+                        output_fn(f"Tool> {result.name} {status}")
                 elif event.kind is EventKind.FINAL_RESPONSE and not streamed_content:
-                    output_fn(f"Agent> {event.data['content']}")
+                    output_fn(f"Agent> {event.final_content()}")
                 elif event.kind in {EventKind.RUN_STOPPED, EventKind.RUN_ERROR}:
-                    output_fn(f"Agent> Task stopped: {event.data['stop_reason']}")
+                    output_fn(f"Agent> Task stopped: {event.stop_reason()}")
         except KeyboardInterrupt:
             output_fn("Agent> Run cancelled.")
             continue
@@ -194,17 +199,8 @@ def _display_last_trace(events: list[AgentEvent], output_fn: Callable[[str], Non
         return
 
     output_fn("Trace> Last run:")
-    for event in events:
-        details = []
-        for key, value in event.data.items():
-            rendered = (
-                json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-                if isinstance(value, (dict, list))
-                else str(value)
-            )
-            details.append(f"{key}={rendered}")
-        suffix = f" {' '.join(details)}" if details else ""
-        output_fn(f"  {event.sequence} {event.kind}{suffix}")
+    for line in Trace(tuple(events)).rendered_lines():
+        output_fn(line)
 
 
 def main() -> int:

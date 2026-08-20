@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore
+from minimal_agent.cost import UsageRecord
 from minimal_agent.persistence import InMemoryRepository, SQLiteRepository
 from minimal_agent.protocol import (
     MESSAGE_SCHEMA_VERSION,
@@ -24,6 +25,10 @@ def test_sqlite_repository_preserves_events_and_unresolved_tool(tmp_path) -> Non
     repository.record_tool("run-1", "call-1", "write", '{"value":1}', "started", idempotent=False)
     repository.record_tool("run-1", "call-1", "write", '{"value":1}', "completed", '{"ok":true}')
     repository.record_tool("run-1", "call-2", "write", '{"value":2}', "started", idempotent=False)
+    repository.record_usage(
+        "run-1",
+        UsageRecord(4, 2, 1, 5.0, 0.01, "provider", "provider", 1, "usage-1", "agent"),
+    )
 
     assert repository.unresolved_tools()[0].call_id == "call-2"
     assert repository.event_payloads("run-1")[0]["authorization"] == "[REDACTED]"
@@ -31,6 +36,9 @@ def test_sqlite_repository_preserves_events_and_unresolved_tool(tmp_path) -> Non
     repository.close()
     reopened = SQLiteRepository(path)
     assert reopened.unresolved_tools()[0].run_id == "run-1"
+    assert reopened.usage("run-1")[0].input_tokens == 4
+    assert reopened.usage("run-1")[0].step == 1
+    assert reopened.usage("run-1")[0].call_id == "usage-1"
 
 
 def test_core_can_persist_a_completed_run() -> None:
@@ -44,6 +52,8 @@ def test_core_can_persist_a_completed_run() -> None:
     assert result.final_response == "done"
     assert repository.run_status(result.run_id) == "finished"
     assert repository.event_count(result.run_id) >= 4
+    assert repository.usage(result.run_id) == result.trace.usage()
+    assert repository.usage(result.run_id)[0].step == 1
 
 
 def test_recovery_requires_idempotency_and_links_continuation(tmp_path) -> None:

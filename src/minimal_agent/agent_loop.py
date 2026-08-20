@@ -1,11 +1,16 @@
 """Provider-independent model/tool execution loop."""
 
 import json
-import time
 from collections.abc import Callable
 
 from minimal_agent.context import ContextBuilder, ContextError
-from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
+from minimal_agent.cost import (
+    ModelCallPurpose,
+    PromptCacheStore,
+    UsageRecord,
+    checkpoint_for,
+    usage_record,
+)
 from minimal_agent.events import EventKind
 from minimal_agent.persistence import ToolExecutionRepository
 from minimal_agent.protocol import (
@@ -19,7 +24,7 @@ from minimal_agent.protocol import (
     ToolCallDelta,
     ToolResultMessage,
 )
-from minimal_agent.provider_client import ProviderClient, aggregate_stream
+from minimal_agent.provider_client import ProviderClient
 from minimal_agent.run import (
     LoopOutcome,
     LoopStateMachine,
@@ -89,51 +94,56 @@ class AgentLoop:
                     EventKind.MODEL_CALL_STARTED,
                     {"step": step, "message_count": len(self._session.messages)},
                 )
-                model_started = time.perf_counter()
+                call_usages: list[UsageRecord] = []
                 try:
-                    context = self._context_builder.build(
-                        self._session.messages, system_prompt=self._session.system_prompt
-                    )
-                    metadata = {
-                        "step": step,
-                        "estimated_tokens_before": context.estimated_tokens_before,
-                        "estimated_tokens": context.estimated_tokens,
-                        "input_budget": context.input_budget,
-                        "compressed": context.compressed,
-                        "summary_count": len(context.summaries),
-                        "summary_cache_hits": context.cache_hits,
-                        "compression_elapsed_ms": context.elapsed_ms,
-                        "estimator": self._context_builder.estimator.name,
-                    }
-                    context_metadata.append(metadata)
-                    response = _model_response(
-                        self._model,
-                        context.messages,
-                        self._tools.definitions(),
-                        self._context_builder.config.reserved_output_tokens,
-                        emit,
-                        step,
-                    )
-                    capabilities = self._model.capabilities()
-                    checkpoint = checkpoint_for(
-                        context.messages,
-                        session_id=self._session.session_id,
-                        message_index=len(context.messages),
-                        model=getattr(self._model, "model_name", type(self._model).__name__),
-                        tool_schema=self._tools.definitions(),
-                        system_prompt=self._session.system_prompt,
-                        context_builder=self._context_builder.estimator.name,
-                    )
-                    local_cache_hit = self._cache_store.lookup(checkpoint)
-                    self._cache_store.record(checkpoint)
-                    usage = usage_record(
-                        response,
-                        estimated_input=context.estimated_tokens,
-                        latency_ms=(time.perf_counter() - model_started) * 1000,
-                        capabilities=capabilities,
-                        local_cache_hit=local_cache_hit,
-                    )
+                    with self._model.observe_calls(call_usages.append, step=step):
+                        context = self._context_builder.build(
+                            self._session.messages, system_prompt=self._session.system_prompt
+                        )
+                        metadata = {
+                            "step": step,
+                            "estimated_tokens_before": context.estimated_tokens_before,
+                            "estimated_tokens": context.estimated_tokens,
+                            "input_budget": context.input_budget,
+                            "compressed": context.compressed,
+                            "summary_count": len(context.summaries),
+                            "summary_cache_hits": context.cache_hits,
+                            "compression_elapsed_ms": context.elapsed_ms,
+                            "estimator": self._context_builder.estimator.name,
+                        }
+                        context_metadata.append(metadata)
+                        response = _model_response(
+                            self._model,
+                            context.messages,
+                            self._tools.definitions(),
+                            self._context_builder.config.reserved_output_tokens,
+                            emit,
+                            step,
+                        )
+                        checkpoint = checkpoint_for(
+                            context.messages,
+                            session_id=self._session.session_id,
+                            message_index=len(context.messages),
+                            model=getattr(self._model, "model_name", type(self._model).__name__),
+                            tool_schema=self._tools.definitions(),
+                            system_prompt=self._session.system_prompt,
+                            context_builder=self._context_builder.estimator.name,
+                        )
+                        local_cache_hit = self._cache_store.lookup(checkpoint)
+                        self._cache_store.record(checkpoint)
+                        primary = call_usages[-1]
+                        call_usages[-1] = usage_record(
+                            response,
+                            estimated_input=context.estimated_tokens,
+                            latency_ms=primary.latency_ms,
+                            capabilities=self._model.capabilities(),
+                            local_cache_hit=local_cache_hit,
+                            step=step,
+                            call_id=primary.call_id,
+                            purpose=primary.purpose,
+                        )
                 except ContextError as error:
+                    _emit_usage(call_usages, emit)
                     return _error_outcome(
                         state,
                         error.code,
@@ -143,6 +153,7 @@ class AgentLoop:
                         context_metadata=context_metadata,
                     )
                 except ProviderError as error:
+                    _emit_usage(call_usages, emit)
                     return _error_outcome(
                         state,
                         error.kind.value.upper(),
@@ -152,6 +163,7 @@ class AgentLoop:
                         provider_error=error,
                         context_metadata=context_metadata,
                     )
+                _emit_usage(call_usages, emit)
                 emit(
                     EventKind.MODEL_RESPONSE,
                     {
@@ -160,7 +172,6 @@ class AgentLoop:
                         "tool_calls": tuple(_tool_data(call) for call in response.tool_calls),
                         "usage": response.usage,
                         "provider_cache_hit": response.provider_cache_hit,
-                        "usage_record": usage,
                         "prompt_cache_checkpoint": checkpoint,
                     },
                 )
@@ -350,8 +361,6 @@ def _model_response(
     emit: Emit,
     step: int,
 ) -> ModelResponse:
-    events = []
-
     def attempt_event(event) -> None:
         error = event.error
         emit(
@@ -370,11 +379,12 @@ def _model_response(
         RequestOptions(
             tools=tuple(tool_definitions),
             max_output_tokens=max_output_tokens,
+            metadata={"call_purpose": ModelCallPurpose.AGENT.value, "step": step},
         ),
     )
     streaming = model.capabilities().streaming
-    for event in model.stream(request, on_attempt=attempt_event):
-        events.append(event)
+
+    def stream_event(event) -> None:
         if streaming and isinstance(event, TextDelta):
             emit(EventKind.MODEL_CONTENT_DELTA, {"step": step, "content_delta": event.text})
         elif streaming and isinstance(event, ToolCallDelta):
@@ -387,4 +397,10 @@ def _model_response(
                     "arguments_delta": event.arguments_delta,
                 },
             )
-    return aggregate_stream(events)
+
+    return model.invoke(request, on_event=stream_event, on_attempt=attempt_event)
+
+
+def _emit_usage(usages: list[UsageRecord], emit: Emit) -> None:
+    for usage in usages:
+        emit(EventKind.MODEL_USAGE_RECORDED, {"usage_record": usage})

@@ -4,6 +4,7 @@ import time
 from collections.abc import Sequence
 
 from minimal_agent.core import AgentCore, RunControl, StopReason
+from minimal_agent.cost import UsageStatus
 from minimal_agent.events import EventKind
 from minimal_agent.protocol import ChatMessage, ModelResponse, ModelStreamChunk, ToolCall
 from minimal_agent.tools import ToolDefinition, ToolRegistry
@@ -46,14 +47,16 @@ def test_core_runs_tool_loop_and_publishes_ordered_events() -> None:
     assert [event.kind for event in events] == [
         "run_started",
         "model_call_started",
+        "model_usage_recorded",
         "model_response",
         "tool_call_requested",
         "tool_result_produced",
         "model_call_started",
+        "model_usage_recorded",
         "model_response",
         "final_response",
     ]
-    assert [event.sequence for event in events] == list(range(1, 9))
+    assert [event.sequence for event in events] == list(range(1, len(events) + 1))
 
 
 def test_stream_yields_incremental_content_and_preserves_terminal_order() -> None:
@@ -72,18 +75,17 @@ def test_stream_yields_incremental_content_and_preserves_terminal_order() -> Non
         EventKind.MODEL_CALL_STARTED,
         EventKind.MODEL_CONTENT_DELTA,
         EventKind.MODEL_CONTENT_DELTA,
+        EventKind.MODEL_USAGE_RECORDED,
         EventKind.MODEL_RESPONSE,
         EventKind.FINAL_RESPONSE,
     ]
     assert [
-        event.data["content_delta"]
-        for event in events
-        if event.kind is EventKind.MODEL_CONTENT_DELTA
+        event.content_delta() for event in events if event.kind is EventKind.MODEL_CONTENT_DELTA
     ] == [
         "hel",
         "lo",
     ]
-    assert events[-1].data["content"] == "hello"
+    assert events[-1].final_content() == "hello"
 
 
 def test_completed_stream_does_not_cancel_caller_control() -> None:
@@ -163,7 +165,8 @@ def test_stream_buffers_tool_call_fragments_before_execution() -> None:
 
     assert any(event.kind is EventKind.TOOL_CALL_DELTA for event in events)
     tool_result = next(event for event in events if event.kind is EventKind.TOOL_RESULT_PRODUCED)
-    assert '"ok":true' in str(tool_result.data["result"])
+    assert tool_result.tool_result() is not None
+    assert '"ok":true' in tool_result.tool_result().result
     assert events[-1].kind is EventKind.FINAL_RESPONSE
 
 
@@ -178,7 +181,8 @@ def test_stream_rejects_incomplete_tool_call_fragments() -> None:
     events = list(AgentCore(IncompleteModel()).stream("echo"))
 
     error = next(event for event in events if event.kind is EventKind.RUN_ERROR)
-    assert error.data["error"].code == "INVALID_RESPONSE"
+    assert error.terminal_error() is not None
+    assert error.terminal_error().code == "INVALID_RESPONSE"
 
 
 def test_steering_is_applied_at_the_next_model_boundary() -> None:
@@ -273,7 +277,8 @@ def test_concurrent_stream_exposes_busy_error_event() -> None:
 
     assert len(events) == 1
     assert events[0].kind is EventKind.RUN_ERROR
-    assert events[0].data["error"].code == "SESSION_BUSY"
+    assert events[0].terminal_error() is not None
+    assert events[0].terminal_error().code == "SESSION_BUSY"
 
 
 def test_registry_turns_unknown_tool_into_structured_result() -> None:
@@ -441,6 +446,11 @@ def test_run_result_contains_complete_trace_snapshot() -> None:
     assert {event.run_id for event in result.events} == {result.run_id}
     assert all(event.elapsed_ms >= 0 for event in result.events)
     assert all(event.occurred_at.tzinfo is not None for event in result.events)
+    assert result.trace.kinds()[0] is EventKind.RUN_STARTED
+    assert result.trace.tool_calls()[0].name == "read"
+    assert result.trace.tool_calls()[0].arguments == {}
+    assert [usage.step for usage in result.trace.usage()] == [1, 2]
+    assert result.trace.terminal_error() is None
     try:
         result.events[0].data["changed"] = True
     except TypeError:
@@ -496,10 +506,13 @@ def test_tool_result_trace_includes_result_and_success() -> None:
     ).prompt("read it")
 
     tool_event = next(
-        event for event in result.events if event.kind is EventKind.TOOL_RESULT_PRODUCED
+        event.tool_result()
+        for event in result.events
+        if event.kind is EventKind.TOOL_RESULT_PRODUCED
     )
-    assert tool_event.data["success"] is True
-    assert json.loads(str(tool_event.data["result"]))["data"] == {"ok": True}
+    assert tool_event is not None
+    assert tool_event.success is True
+    assert json.loads(tool_event.result)["data"] == {"ok": True}
 
 
 def test_registry_validates_arguments_before_execution() -> None:
@@ -625,5 +638,20 @@ def test_repeated_context_reports_local_checkpoint_hit() -> None:
 
     result = core.prompt("same context")
 
-    model_event = next(event for event in result.events if event.kind is EventKind.MODEL_RESPONSE)
-    assert model_event.data["usage_record"].cache_hit_source == "local"
+    assert result.trace.usage()[-1].cache_hit_source == "local"
+
+
+def test_trace_exposes_terminal_error_without_event_payload_keys() -> None:
+    class Fails:
+        def complete(self, _messages):
+            raise RuntimeError("failed")
+
+    result = AgentCore(Fails()).prompt("go")
+
+    error = result.trace.terminal_error()
+    assert error is not None
+    assert error.code == "UNKNOWN"
+    assert len(result.trace.usage()) == 1
+    assert result.trace.usage()[0].status is UsageStatus.FAILED
+    assert result.trace.usage()[0].error_code == "unknown"
+    assert result.trace.usage()[0].call_id

@@ -105,6 +105,7 @@ def test_eval_optional_event_and_usage_assertions_remain_deterministic() -> None
                 "event_kinds": [
                     "run_started",
                     "model_call_started",
+                    "model_usage_recorded",
                     "model_response",
                     "final_response",
                 ],

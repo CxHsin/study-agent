@@ -9,7 +9,7 @@ from uuid import uuid4
 from minimal_agent.agent_loop import AgentLoop
 from minimal_agent.context import ContextBuilder, ModelSummarizer
 from minimal_agent.cost import PromptCacheStore
-from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
+from minimal_agent.events import AgentEvent, AgentEventListener, EventKind, Trace
 from minimal_agent.persistence import (
     Repository,
     RunRepository,
@@ -312,7 +312,7 @@ class AgentCore:
             outcome.steps_used,
             run_id,
             outcome.error,
-            tuple(trace),
+            Trace(tuple(trace)),
             tuple(MappingProxyType(dict(item)) for item in outcome.context_metadata),
         )
 
@@ -342,6 +342,10 @@ class AgentCore:
         trace.append(event)
         if self._runs is not None:
             self._runs.append_event(run_id, event.sequence, event.kind.value, event.data)
+            usage = event.usage()
+            record_usage = getattr(self._runs, "record_usage", None)
+            if usage is not None and callable(record_usage):
+                record_usage(run_id, usage)
         if event_sink is not None:
             event_sink(event)
         for index, listener in enumerate(self._listeners):

@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import Any
 
 from minimal_agent.core import AgentCore, RunResult, StopReason
-from minimal_agent.events import EventKind
+from minimal_agent.events import EventKind, TraceToolCall
 from minimal_agent.protocol import (
     ModelAdapter,
     ModelRequest,
@@ -200,7 +200,18 @@ class _CountingClient(ProviderClient):
         self.budget = budget
         self.calls = 0
 
+    def invoke(self, request: ModelRequest, *, on_event=None, on_attempt=None):
+        self._reserve(request)
+        return self._client.invoke(request, on_event=on_event, on_attempt=on_attempt)
+
     def stream(self, request: ModelRequest, *, on_attempt=None):
+        self._reserve(request)
+        yield from self._client.stream(request, on_attempt=on_attempt)
+
+    def observe_calls(self, listener, *, step: int):
+        return self._client.observe_calls(listener, step=step)
+
+    def _reserve(self, request: ModelRequest) -> None:
         if self.budget.calls >= self.limits.max_model_calls:
             raise EvalLimitError("max_model_calls exceeded")
         self.calls += 1
@@ -216,7 +227,6 @@ class _CountingClient(ProviderClient):
         )
         if self.budget.tokens > self.limits.token_budget:
             raise EvalLimitError("token_budget exceeded")
-        yield from self._client.stream(request, on_attempt=on_attempt)
 
 
 class EvalLimitError(RuntimeError):
@@ -347,7 +357,7 @@ def _hard_rules(
         ),
     ]
     if expected.event_kinds:
-        observed = tuple(event.kind.value for event in result.events)
+        observed = tuple(kind.value for kind in result.trace.kinds())
         rules.append(
             RuleResult(
                 "event_kinds",
@@ -360,17 +370,9 @@ def _hard_rules(
         rules.append(
             RuleResult(f"capability:{capability}", supported, f"provider capability {capability}")
         )
-    usage_events = [
-        event
-        for event in result.events
-        if event.kind.value == "model_response" and event.data.get("usage_record")
-    ]
+    usage = result.trace.usage()
     if expected.usage_source:
-        actual = (
-            getattr(usage_events[-1].data["usage_record"], "source", "unknown")
-            if usage_events
-            else "unknown"
-        )
+        actual = usage[-1].source if usage else "unknown"
         rules.append(
             RuleResult(
                 "usage_source",
@@ -379,11 +381,7 @@ def _hard_rules(
             )
         )
     if expected.cache_hit_source:
-        actual = (
-            getattr(usage_events[-1].data["usage_record"], "cache_hit_source", "unknown")
-            if usage_events
-            else "unknown"
-        )
+        actual = usage[-1].cache_hit_source if usage else "unknown"
         rules.append(
             RuleResult(
                 "cache_hit_source",
@@ -392,7 +390,7 @@ def _hard_rules(
             )
         )
     if expected.steering_count is not None:
-        actual = sum(event.kind.value == "steering_message_accepted" for event in result.events)
+        actual = result.trace.steering_count()
         rules.append(
             RuleResult(
                 "steering_count",
@@ -415,11 +413,7 @@ def _hard_rules(
 def compare_trajectory(
     result: RunResult, expected: EvalExpectation, tools: ToolRegistry
 ) -> RuleResult:
-    observed = [
-        _tool_from_event(event.data)
-        for event in result.events
-        if event.kind.value == "tool_call_requested"
-    ]
+    observed = [_tool_expectation(tool_call) for tool_call in result.trace.tool_calls()]
     names = [item.name for item in observed]
     if any(name not in expected.allowed_tools for name in names):
         return RuleResult(
@@ -483,15 +477,8 @@ def load_cases(path: Path) -> tuple[EvalCase, ...]:
     return tuple(EvalCase.from_mapping(item) for item in raw_cases if isinstance(item, Mapping))
 
 
-def _tool_from_event(data: Mapping[str, object]) -> ToolExpectation:
-    arguments = data.get("arguments", "{}")
-    try:
-        decoded = json.loads(str(arguments))
-    except json.JSONDecodeError:
-        decoded = str(arguments)
-    return ToolExpectation(
-        str(data.get("name", "")), decoded if isinstance(decoded, Mapping) else None
-    )
+def _tool_expectation(tool_call: TraceToolCall) -> ToolExpectation:
+    return ToolExpectation(tool_call.name, tool_call.arguments)
 
 
 def _matches_tool(actual: ToolExpectation, expected: ToolExpectation) -> bool:

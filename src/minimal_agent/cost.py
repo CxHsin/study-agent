@@ -3,8 +3,19 @@
 import hashlib
 import json
 from dataclasses import dataclass
+from enum import StrEnum
 
 from minimal_agent.protocol import ChatMessage, ModelResponse, ModelUsage, ProviderCapabilities
+
+
+class ModelCallPurpose(StrEnum):
+    AGENT = "agent"
+    CONTEXT_SUMMARY = "context_summary"
+
+
+class UsageStatus(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -27,6 +38,15 @@ class UsageRecord:
     cost: float | None
     source: str
     cache_hit_source: str
+    step: int = 0
+    call_id: str = ""
+    purpose: ModelCallPurpose = ModelCallPurpose.AGENT
+    status: UsageStatus = UsageStatus.SUCCEEDED
+    error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "purpose", ModelCallPurpose(self.purpose))
+        object.__setattr__(self, "status", UsageStatus(self.status))
 
 
 def checkpoint_for(
@@ -72,6 +92,11 @@ def usage_record(
     cost: float | None = None,
     capabilities: ProviderCapabilities | None = None,
     local_cache_hit: bool = False,
+    step: int = 0,
+    call_id: str = "",
+    purpose: ModelCallPurpose = ModelCallPurpose.AGENT,
+    status: UsageStatus = UsageStatus.SUCCEEDED,
+    error_code: str | None = None,
 ) -> UsageRecord:
     usage: ModelUsage | None = response.usage
     reported = usage is not None and not usage.estimated
@@ -94,6 +119,11 @@ def usage_record(
         if response.provider_cache_hit is True
         and (capabilities is None or capabilities.prompt_cache)
         else "unknown",
+        step,
+        call_id,
+        purpose,
+        status,
+        error_code,
     )
 
 

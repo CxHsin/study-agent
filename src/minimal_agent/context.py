@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import ClassVar, Protocol
 
+from minimal_agent.cost import ModelCallPurpose
 from minimal_agent.protocol import (
     AssistantMessage,
     ChatMessage,
@@ -130,7 +131,13 @@ class ModelSummarizer:
             UserMessage(f"<conversation>\n{source}\n</conversation>"),
         )
         response = self._model.complete(
-            ModelRequest(summary_messages, RequestOptions(tool_choice=ToolChoice.NONE))
+            ModelRequest(
+                summary_messages,
+                RequestOptions(
+                    tool_choice=ToolChoice.NONE,
+                    metadata={"call_purpose": ModelCallPurpose.CONTEXT_SUMMARY.value},
+                ),
+            )
         )
         if response.tool_calls or not response.content:
             raise ContextError("CONTEXT_SUMMARY_INVALID", "Summarizer did not return summary text.")

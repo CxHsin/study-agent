@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import cast
+from uuid import uuid4
 
+from minimal_agent.cost import ModelCallPurpose, UsageRecord, UsageStatus, usage_record
 from minimal_agent.protocol import (
     ModelAdapter,
     ModelProfile,
@@ -56,6 +60,13 @@ class ProviderAttemptEvent:
 
 
 AttemptListener = Callable[[ProviderAttemptEvent], None]
+CallListener = Callable[[UsageRecord], None]
+
+
+@dataclass(frozen=True)
+class CallObservationScope:
+    listener: CallListener
+    step: int
 
 
 class LegacyModelAdapter:
@@ -129,6 +140,7 @@ class ProviderClient:
         self._sleep = sleep
         self._monotonic = monotonic
         self._random = random_value
+        self._call_scopes = threading.local()
 
     @property
     def model_name(self) -> str:
@@ -138,7 +150,77 @@ class ProviderClient:
         return self.profile.capabilities
 
     def complete(self, request: ModelRequest) -> ModelResponse:
-        return aggregate_stream(self.stream(request))
+        return self.invoke(request)
+
+    def invoke(
+        self,
+        request: ModelRequest,
+        *,
+        on_event: Callable[[ProviderStreamEvent], None] | None = None,
+        on_attempt: AttemptListener | None = None,
+    ) -> ModelResponse:
+        started = self._monotonic()
+        call_id = str(uuid4())
+        scope = self._active_call_scope()
+        metadata = request.options.metadata
+        step = scope.step if scope is not None else int(metadata.get("step", 0))
+        purpose = ModelCallPurpose(metadata.get("call_purpose", ModelCallPurpose.AGENT))
+        try:
+            events = []
+            for event in self.stream(request, on_attempt=on_attempt):
+                events.append(event)
+                if on_event is not None:
+                    on_event(event)
+            response = aggregate_stream(events)
+        except ProviderError as error:
+            self._notify_call(
+                UsageRecord(
+                    None,
+                    None,
+                    None,
+                    (self._monotonic() - started) * 1000,
+                    None,
+                    "unknown",
+                    "unknown",
+                    step,
+                    call_id,
+                    purpose,
+                    UsageStatus.FAILED,
+                    error.kind.value,
+                ),
+                scope,
+            )
+            raise
+        self._notify_call(
+            usage_record(
+                response,
+                latency_ms=(self._monotonic() - started) * 1000,
+                capabilities=self.capabilities(),
+                step=step,
+                call_id=call_id,
+                purpose=purpose,
+            ),
+            scope,
+        )
+        return response
+
+    @contextmanager
+    def observe_calls(self, listener: CallListener, *, step: int) -> Iterator[None]:
+        scopes = getattr(self._call_scopes, "value", [])
+        scope = CallObservationScope(listener, step)
+        self._call_scopes.value = [*scopes, scope]
+        try:
+            yield
+        finally:
+            self._call_scopes.value = scopes
+
+    def _active_call_scope(self) -> CallObservationScope | None:
+        scopes = getattr(self._call_scopes, "value", ())
+        return scopes[-1] if scopes else None
+
+    def _notify_call(self, usage: UsageRecord, scope: CallObservationScope | None) -> None:
+        if scope is not None:
+            scope.listener(usage)
 
     def stream(
         self, request: ModelRequest, *, on_attempt: AttemptListener | None = None
