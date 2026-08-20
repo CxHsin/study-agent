@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from minimal_agent.context import ContextBuilder, ContextError
 from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
-from minimal_agent.events import AgentEvent, EventKind
+from minimal_agent.events import EventKind
 from minimal_agent.persistence import ToolExecutionRepository
 from minimal_agent.protocol import (
     AssistantMessage,
@@ -17,17 +17,18 @@ from minimal_agent.protocol import (
     ToolCall,
     ToolResultMessage,
 )
-from minimal_agent.run import RunControl, RunResult, StopReason
+from minimal_agent.run import (
+    LoopOutcome,
+    LoopStateMachine,
+    RunControl,
+    RunError,
+    RunPhase,
+    StopReason,
+)
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolError, ToolRegistry, ToolResult
 
-EventSink = Callable[[AgentEvent], None]
 Emit = Callable[[EventKind, dict[str, object]], None]
-ResultFactory = Callable[
-    [str, StopReason, int, list[AgentEvent], Emit, list[dict[str, object]]], RunResult
-]
-ErrorFactory = Callable[..., RunResult]
-FinishFactory = Callable[[RunResult, list[AgentEvent]], RunResult]
 ModelResponseFactory = Callable[..., ModelResponse]
 CapabilitiesFactory = Callable[[ModelAdapter], ProviderCapabilities]
 
@@ -46,10 +47,6 @@ class AgentLoop:
         tool_ledger: ToolExecutionRepository | None,
         cache_store: PromptCacheStore,
         apply_steering: Callable[[str, int, Emit], None],
-        close_steering: Callable[[], None],
-        result: ResultFactory,
-        error: ErrorFactory,
-        finish: FinishFactory,
         model_response: ModelResponseFactory,
         provider_capabilities: CapabilitiesFactory,
     ) -> None:
@@ -61,10 +58,6 @@ class AgentLoop:
         self._tool_ledger = tool_ledger
         self._cache_store = cache_store
         self._apply_steering = apply_steering
-        self._close_steering = close_steering
-        self._result = result
-        self._error = error
-        self._finish = finish
         self._model_response = model_response
         self._provider_capabilities = provider_capabilities
 
@@ -77,8 +70,8 @@ class AgentLoop:
         user_input: str,
         control: RunControl,
         emit: Emit,
-        trace: list[AgentEvent],
-    ) -> RunResult:
+    ) -> LoopOutcome:
+        state = LoopStateMachine()
         context_metadata: list[dict[str, object]] = []
         last_fingerprint: str | None = None
         pending_repeat: str | None = None
@@ -92,7 +85,8 @@ class AgentLoop:
             for step in range(1, self._max_steps + 1):
                 stop = control.stop_reason
                 if stop:
-                    return self._result(run_id, stop, step - 1, trace, emit, context_metadata)
+                    return _outcome(state, stop, step - 1, context_metadata)
+                state.transition(RunPhase.MODEL, step=step)
                 self._apply_steering(run_id, step, emit)
                 emit(
                     EventKind.MODEL_CALL_STARTED,
@@ -143,26 +137,22 @@ class AgentLoop:
                         local_cache_hit=local_cache_hit,
                     )
                 except ContextError as error:
-                    return self._error(
-                        run_id,
+                    return _error_outcome(
+                        state,
                         error.code,
                         str(error),
                         "context_error",
                         step,
-                        trace=trace,
-                        emit=emit,
                         context_metadata=context_metadata,
                     )
                 except ProviderError as error:
-                    return self._error(
-                        run_id,
+                    return _error_outcome(
+                        state,
                         error.kind.value.upper(),
                         str(error) or "Model request failed.",
                         "provider_error",
                         step,
                         provider_error=error,
-                        trace=trace,
-                        emit=emit,
                         context_metadata=context_metadata,
                     )
                 emit(
@@ -179,56 +169,46 @@ class AgentLoop:
                 )
                 stop = control.stop_reason
                 if stop:
-                    return self._result(run_id, stop, step, trace, emit, context_metadata)
+                    return _outcome(state, stop, step, context_metadata)
                 if not response.tool_calls:
                     if not response.content:
-                        return self._error(
-                            run_id,
+                        return _error_outcome(
+                            state,
                             "INVALID_MODEL_RESPONSE",
                             "Model returned no final content.",
                             "model_error",
                             step,
-                            trace=trace,
-                            emit=emit,
                             context_metadata=context_metadata,
                         )
                     self._session.append(AssistantMessage(response.content))
-                    self._close_steering()
-                    emit(EventKind.FINAL_RESPONSE, {"step": step, "content": response.content})
-                    return self._finish(
-                        RunResult(
-                            response.content,
-                            StopReason.FINAL,
-                            step,
-                            run_id,
-                            context_metadata=tuple(context_metadata),
-                        ),
-                        trace,
+                    return _outcome(
+                        state,
+                        StopReason.FINAL,
+                        step,
+                        context_metadata,
+                        final_response=response.content,
                     )
 
+                state.transition(RunPhase.TOOL)
                 fingerprints = [_fingerprint(call) for call in response.tool_calls]
                 if any(call.id in seen_tool_call_ids for call in response.tool_calls):
-                    return self._error(
-                        run_id,
+                    return _error_outcome(
+                        state,
                         "REPEATED_TOOL_CALL",
                         "Model repeated a Tool Call.",
                         "control_error",
                         step,
                         StopReason.REPEATED_TOOL_CALL,
-                        trace=trace,
-                        emit=emit,
                         context_metadata=context_metadata,
                     )
                 if pending_repeat is not None and pending_repeat in fingerprints:
-                    return self._error(
-                        run_id,
+                    return _error_outcome(
+                        state,
                         "REPEATED_TOOL_CALL",
                         "Model repeated a blocked tool call.",
                         "control_error",
                         step,
                         StopReason.REPEATED_TOOL_CALL,
-                        trace=trace,
-                        emit=emit,
                         context_metadata=context_metadata,
                     )
                 self._session.append(AssistantMessage(response.content, response.tool_calls))
@@ -236,7 +216,7 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     stop = control.stop_reason
                     if stop:
-                        return self._result(run_id, stop, step, trace, emit, context_metadata)
+                        return _outcome(state, stop, step, context_metadata)
                     fingerprint = _fingerprint(tool_call)
                     if fingerprint == last_fingerprint:
                         tool_result = ToolResult(
@@ -279,21 +259,54 @@ class AgentLoop:
                     emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(tool_result))
                     stop = control.stop_reason
                     if stop:
-                        return self._result(run_id, stop, step, trace, emit, context_metadata)
-            return self._result(
-                run_id, StopReason.MAX_STEPS, self._max_steps, trace, emit, context_metadata
-            )
+                        return _outcome(state, stop, step, context_metadata)
+            return _outcome(state, StopReason.MAX_STEPS, self._max_steps, context_metadata)
         except Exception as error:  # noqa: BLE001 - run boundary returns structured errors
-            return self._error(
-                run_id,
+            return _error_outcome(
+                state,
                 "INTERNAL_ERROR",
                 str(error) or "Internal error.",
                 "internal_error",
                 locals().get("step", 0),
-                trace=trace,
-                emit=emit,
                 context_metadata=context_metadata,
             )
+
+
+def _outcome(
+    state: LoopStateMachine,
+    reason: StopReason,
+    steps: int,
+    context_metadata: list[dict[str, object]],
+    *,
+    final_response: str | None = None,
+    error: RunError | None = None,
+) -> LoopOutcome:
+    state.transition(RunPhase.TERMINAL)
+    return LoopOutcome(final_response, reason, steps, error, tuple(context_metadata))
+
+
+def _error_outcome(
+    state: LoopStateMachine,
+    code: str,
+    message: str,
+    error_type: str,
+    step: int,
+    reason: StopReason = StopReason.ERROR,
+    *,
+    provider_error: ProviderError | None = None,
+    context_metadata: list[dict[str, object]],
+) -> LoopOutcome:
+    error = RunError(
+        code,
+        message,
+        error_type,
+        step,
+        retryable=provider_error.retryable if provider_error else False,
+        status_code=provider_error.status_code if provider_error else None,
+        provider_request_id=provider_error.request_id if provider_error else None,
+        retry_after=provider_error.retry_after if provider_error else None,
+    )
+    return _outcome(state, reason, step, context_metadata, error=error)
 
 
 def _tool_data(tool_call: ToolCall) -> dict[str, object]:

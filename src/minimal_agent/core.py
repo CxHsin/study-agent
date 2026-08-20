@@ -35,7 +35,7 @@ from minimal_agent.protocol import (
     UserMessage,
 )
 from minimal_agent.provider_client import ProviderClient, aggregate_stream
-from minimal_agent.run import RunControl, RunError, RunResult, StopReason
+from minimal_agent.run import LoopOutcome, RunControl, RunError, RunResult, StopReason
 from minimal_agent.session import AgentSession
 from minimal_agent.tools import ToolRegistry
 
@@ -87,10 +87,6 @@ class AgentCore:
             tool_ledger=self._tool_ledger,
             cache_store=self._cache_store,
             apply_steering=self._apply_steering,
-            close_steering=self._close_steering,
-            result=self._result,
-            error=self._error,
-            finish=self._finish,
             model_response=_model_response,
             provider_capabilities=_provider_capabilities,
         )
@@ -247,7 +243,8 @@ class AgentCore:
                 "message_count": len(self._session.messages),
             },
         )
-        return self._loop.run(run_id, user_input, control, emit, trace)
+        outcome = self._loop.run(run_id, user_input, control, emit)
+        return self._finalize(outcome, run_id, trace, emit)
 
     def _discard_pending_steering(self) -> None:
         while True:
@@ -284,71 +281,47 @@ class AgentCore:
                 {"step": step, "content": message, "run_id": run_id},
             )
 
-    def _finish(self, result: RunResult, trace: list[AgentEvent]) -> RunResult:
+    def _finalize(
+        self,
+        outcome: LoopOutcome,
+        run_id: str,
+        trace: list[AgentEvent],
+        emit,
+    ) -> RunResult:
         self._close_steering()
+        if outcome.stop_reason is StopReason.FINAL:
+            emit(
+                EventKind.FINAL_RESPONSE,
+                {"step": outcome.steps_used, "content": outcome.final_response},
+            )
+        elif outcome.error is not None:
+            emit(
+                EventKind.RUN_ERROR,
+                {
+                    "stop_reason": outcome.stop_reason.value,
+                    "steps_used": outcome.steps_used,
+                    "error": outcome.error,
+                },
+            )
+        elif outcome.stop_reason is not StopReason.FINAL:
+            emit(
+                EventKind.RUN_STOPPED,
+                {
+                    "stop_reason": outcome.stop_reason.value,
+                    "steps_used": outcome.steps_used,
+                },
+            )
         self._save_session()
         if self._runs is not None:
-            self._runs.finish_run(result.run_id, result.stop_reason.value, result.steps_used)
+            self._runs.finish_run(run_id, outcome.stop_reason.value, outcome.steps_used)
         return RunResult(
-            result.final_response,
-            result.stop_reason,
-            result.steps_used,
-            result.run_id,
-            result.error,
+            outcome.final_response,
+            outcome.stop_reason,
+            outcome.steps_used,
+            run_id,
+            outcome.error,
             tuple(trace),
-            tuple(MappingProxyType(dict(item)) for item in result.context_metadata),
-        )
-
-    def _result(
-        self,
-        run_id: str,
-        reason: StopReason,
-        steps: int,
-        trace: list[AgentEvent],
-        emit,
-        context_metadata: list[dict[str, object]] | None = None,
-    ) -> RunResult:
-        self._close_steering()
-        emit(EventKind.RUN_STOPPED, {"stop_reason": reason.value, "steps_used": steps})
-        return self._finish(
-            RunResult(None, reason, steps, run_id, context_metadata=tuple(context_metadata or ())),
-            trace,
-        )
-
-    def _error(
-        self,
-        run_id: str,
-        code: str,
-        message: str,
-        error_type: str,
-        step: int,
-        reason: StopReason = StopReason.ERROR,
-        *,
-        provider_error: ProviderError | None = None,
-        trace: list[AgentEvent],
-        emit,
-        context_metadata: list[dict[str, object]] | None = None,
-    ) -> RunResult:
-        self._close_steering()
-        error = RunError(
-            code,
-            message,
-            error_type,
-            step,
-            retryable=provider_error.retryable if provider_error else False,
-            status_code=provider_error.status_code if provider_error else None,
-            provider_request_id=provider_error.request_id if provider_error else None,
-            retry_after=provider_error.retry_after if provider_error else None,
-        )
-        emit(
-            EventKind.RUN_ERROR,
-            {"stop_reason": reason.value, "steps_used": step, "error": error},
-        )
-        return self._finish(
-            RunResult(
-                None, reason, step, run_id, error, context_metadata=tuple(context_metadata or ())
-            ),
-            trace,
+            tuple(MappingProxyType(dict(item)) for item in outcome.context_metadata),
         )
 
     def _close_steering(self) -> None:
