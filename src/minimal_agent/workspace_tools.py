@@ -162,19 +162,39 @@ class WorkspaceTools:
         deadline = time.monotonic() + timeout_ms / 1000
         cancelled = False
         timed_out = False
+        termination_error: ToolError | None = None
         while process.poll() is None:
             if getattr(control, "stop_reason", None) is not None:
                 cancelled = True
-                _terminate_process_tree(process)
+                try:
+                    _terminate_process_tree(process)
+                except ToolError as error:
+                    termination_error = error
+                    process.kill()
                 break
             if time.monotonic() >= deadline:
                 timed_out = True
-                _terminate_process_tree(process)
+                try:
+                    _terminate_process_tree(process)
+                except ToolError as error:
+                    termination_error = error
+                    process.kill()
                 break
             time.sleep(0.01)
-        process.wait()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired as error:
+                raise ToolError(
+                    "PROCESS_TERMINATION_ERROR", "Bash process did not terminate."
+                ) from error
         for reader in readers:
-            reader.join()
+            reader.join(timeout=1)
+        if termination_error is not None:
+            raise termination_error
         if cancelled:
             raise ToolError("TOOL_CANCELLED", "Bash execution was cancelled.")
         return {
@@ -258,15 +278,20 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
                 stderr=subprocess.DEVNULL,
                 timeout=5,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            process.kill()
-        else:
-            if completed.returncode != 0 and process.poll() is None:
-                process.kill()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ToolError(
+                "PROCESS_TREE_TERMINATION_ERROR", "Could not terminate the Bash process tree."
+            ) from error
+        if completed.returncode != 0 and process.poll() is None:
+            raise ToolError(
+                "PROCESS_TREE_TERMINATION_ERROR", "Could not terminate the Bash process tree."
+            )
         return
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except ProcessLookupError:
         return
-    except OSError:
-        process.kill()
+    except OSError as error:
+        raise ToolError(
+            "PROCESS_TREE_TERMINATION_ERROR", "Could not terminate the Bash process group."
+        ) from error

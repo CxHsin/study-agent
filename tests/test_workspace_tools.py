@@ -3,7 +3,7 @@ import threading
 import time
 
 from minimal_agent.core import RunControl
-from minimal_agent.protocol import ToolCall
+from minimal_agent.protocol import ToolCall, ToolError
 from minimal_agent.workspace_tools import WorkspaceTools
 
 
@@ -100,3 +100,25 @@ def test_bash_cancellation_terminates_the_process_tree(tmp_path):
 
     assert not worker.is_alive()
     assert outcome[0].error.code == "TOOL_CANCELLED"
+
+
+def test_bash_reports_process_tree_termination_failure(tmp_path, monkeypatch):
+    def fail_termination(process) -> None:
+        raise ToolError(
+            "PROCESS_TREE_TERMINATION_ERROR", "Could not terminate the Bash process tree."
+        )
+
+    monkeypatch.setattr("minimal_agent.workspace_tools._terminate_process_tree", fail_termination)
+    control = RunControl()
+    control.cancel()
+
+    result = (
+        WorkspaceTools(tmp_path, confirmation=Confirm())
+        .registry()
+        .execute(
+            ToolCall("call", "bash", json.dumps({"command": "sleep 1 | cat"})),
+            control=control,
+        )
+    )
+
+    assert result.error.code == "PROCESS_TREE_TERMINATION_ERROR"
