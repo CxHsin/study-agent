@@ -1,5 +1,7 @@
 """Versioned local persistence and conservative Run recovery."""
 
+from __future__ import annotations
+
 import json
 import re
 import sqlite3
@@ -24,11 +26,21 @@ from minimal_agent.protocol import (
 SCHEMA_VERSION = 1
 
 
-class Repository(Protocol):
+class SessionRepository(Protocol):
     def save_session(
         self, session_id: str, system_prompt: str | None, messages: object
     ) -> None: ...
 
+    def load_session(
+        self, session_id: str
+    ) -> tuple[str | None, tuple[ChatMessage, ...]] | None: ...
+
+    def latest_session(
+        self,
+    ) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None: ...
+
+
+class RunRepository(Protocol):
     def start_run(self, run_id: str, session_id: str, parent_run_id: str | None = None) -> None: ...
 
     def append_event(
@@ -37,6 +49,12 @@ class Repository(Protocol):
 
     def finish_run(self, run_id: str, stop_reason: str, steps_used: int) -> None: ...
 
+    def continuation_session(
+        self, run_id: str
+    ) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None: ...
+
+
+class ToolLedgerRepository(Protocol):
     def record_tool(
         self,
         run_id: str,
@@ -69,6 +87,29 @@ class Repository(Protocol):
         *,
         idempotent: bool = False,
     ) -> None: ...
+
+    def unresolved_tools(self) -> tuple[UnresolvedTool, ...]: ...
+
+    def retry_tool(
+        self, run_id: str, call_id: str, continuation_run_id: str, session_id: str
+    ) -> UnresolvedTool: ...
+
+    def resolve_tool(
+        self,
+        run_id: str,
+        call_id: str,
+        result: str,
+        continuation_run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None: ...
+
+
+class Repository(SessionRepository, RunRepository, ToolLedgerRepository, Protocol):
+    """Composite persistence seam used by the compatibility facade.
+
+    The interfaces are split by responsibility even though SQLite currently
+    provides all three adapters through one connection.
+    """
 
 
 class Redactor:
@@ -156,6 +197,7 @@ class SQLiteRepository:
             self._connection.execute(
                 "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
+
             row = self._connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
             ).fetchone()
@@ -188,6 +230,18 @@ class SQLiteRepository:
                 );
                 """
             )
+
+    @property
+    def sessions(self) -> SQLiteSessionRepository:
+        return SQLiteSessionRepository(self)
+
+    @property
+    def runs(self) -> SQLiteRunRepository:
+        return SQLiteRunRepository(self)
+
+    @property
+    def tools(self) -> SQLiteToolLedgerRepository:
+        return SQLiteToolLedgerRepository(self)
 
     def save_session(self, session_id: str, system_prompt: str | None, messages: object) -> None:
         stored_messages = (
@@ -484,6 +538,110 @@ class SQLiteRepository:
 
     def close(self) -> None:
         self._connection.close()
+
+
+class SQLiteSessionRepository:
+    """Session adapter backed by an existing SQLite repository connection."""
+
+    def __init__(self, backend: SQLiteRepository) -> None:
+        self._backend = backend
+
+    def save_session(self, session_id: str, system_prompt: str | None, messages: object) -> None:
+        self._backend.save_session(session_id, system_prompt, messages)
+
+    def load_session(self, session_id: str) -> tuple[str | None, tuple[ChatMessage, ...]] | None:
+        return self._backend.load_session(session_id)
+
+    def latest_session(self) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None:
+        return self._backend.latest_session()
+
+
+class SQLiteRunRepository:
+    """Run and event adapter backed by an existing SQLite repository connection."""
+
+    def __init__(self, backend: SQLiteRepository) -> None:
+        self._backend = backend
+
+    def start_run(self, run_id: str, session_id: str, parent_run_id: str | None = None) -> None:
+        self._backend.start_run(run_id, session_id, parent_run_id)
+
+    def append_event(
+        self, run_id: str, sequence: int, kind: str, data: Mapping[str, object]
+    ) -> None:
+        self._backend.append_event(run_id, sequence, kind, data)
+
+    def finish_run(self, run_id: str, stop_reason: str, steps_used: int) -> None:
+        self._backend.finish_run(run_id, stop_reason, steps_used)
+
+    def continuation_session(
+        self, run_id: str
+    ) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None:
+        return self._backend.continuation_session(run_id)
+
+
+class SQLiteToolLedgerRepository:
+    """Tool lifecycle and recovery adapter backed by SQLite."""
+
+    def __init__(self, backend: SQLiteRepository) -> None:
+        self._backend = backend
+
+    def record_tool(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: str,
+        status: str,
+        result: str | None = None,
+        *,
+        idempotent: bool = False,
+    ) -> None:
+        self._backend.record_tool(
+            run_id, call_id, name, arguments, status, result, idempotent=idempotent
+        )
+
+    def record_tool_lifecycle(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: str,
+        result: str,
+        *,
+        idempotent: bool = False,
+    ) -> None:
+        self._backend.record_tool_lifecycle(
+            run_id, call_id, name, arguments, result, idempotent=idempotent
+        )
+
+    def record_tool_started(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: str,
+        *,
+        idempotent: bool = False,
+    ) -> None:
+        self._backend.record_tool_started(run_id, call_id, name, arguments, idempotent=idempotent)
+
+    def unresolved_tools(self) -> tuple[UnresolvedTool, ...]:
+        return self._backend.unresolved_tools()
+
+    def retry_tool(
+        self, run_id: str, call_id: str, continuation_run_id: str, session_id: str
+    ) -> UnresolvedTool:
+        return self._backend.retry_tool(run_id, call_id, continuation_run_id, session_id)
+
+    def resolve_tool(
+        self,
+        run_id: str,
+        call_id: str,
+        result: str,
+        continuation_run_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        self._backend.resolve_tool(run_id, call_id, result, continuation_run_id, session_id)
 
 
 class InMemoryRepository(SQLiteRepository):

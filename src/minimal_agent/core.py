@@ -9,9 +9,11 @@ from enum import StrEnum
 from types import MappingProxyType
 from uuid import uuid4
 
+from minimal_agent.agent_loop import AgentLoop
 from minimal_agent.context import ContextBuilder, ContextError, ModelSummarizer
 from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
+from minimal_agent.persistence import Repository
 from minimal_agent.protocol import (
     AssistantMessage,
     ChatMessage,
@@ -92,7 +94,7 @@ class AgentCore:
         session: AgentSession | None = None,
         max_steps: int = 8,
         context_builder: ContextBuilder | None = None,
-        repository: object | None = None,
+        repository: Repository | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive.")
@@ -108,6 +110,7 @@ class AgentCore:
             if self._context_builder.config.reserved_output_tokens > profile.max_output_tokens:
                 raise ValueError("ContextConfig output reserve exceeds the Model Profile limit.")
         self._repository = repository
+        self._loop = AgentLoop(self._run_prompt)
         self._cache_store = PromptCacheStore()
         self._listeners: list[AgentEventListener] = []
         self._sequence = 0
@@ -227,7 +230,7 @@ class AgentCore:
                 )
             return result
         try:
-            return self._run_prompt(run_id, user_input, control, event_sink)
+            return self._loop.run(run_id, user_input, control, event_sink)
         finally:
             with self._active_lock:
                 self._active_control = None
