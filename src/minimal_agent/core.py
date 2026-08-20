@@ -11,7 +11,13 @@ from minimal_agent.agent_loop import AgentLoop
 from minimal_agent.context import ContextBuilder, ModelSummarizer
 from minimal_agent.cost import PromptCacheStore
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
-from minimal_agent.persistence import Repository, repository_adapters
+from minimal_agent.persistence import (
+    Repository,
+    RunRepository,
+    SessionRepository,
+    ToolExecutionRepository,
+    repository_adapters,
+)
 from minimal_agent.protocol import (
     ChatMessage,
     ModelAdapter,
@@ -31,7 +37,7 @@ from minimal_agent.protocol import (
 from minimal_agent.provider_client import ProviderClient, aggregate_stream
 from minimal_agent.run import RunControl, RunError, RunResult, StopReason
 from minimal_agent.session import AgentSession
-from minimal_agent.tools import ToolRegistry, ToolResult
+from minimal_agent.tools import ToolRegistry
 
 
 class AgentCore:
@@ -43,6 +49,10 @@ class AgentCore:
         max_steps: int = 8,
         context_builder: ContextBuilder | None = None,
         repository: Repository | None = None,
+        *,
+        session_repository: SessionRepository | None = None,
+        run_repository: RunRepository | None = None,
+        tool_execution_repository: ToolExecutionRepository | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be positive.")
@@ -58,9 +68,9 @@ class AgentCore:
             if self._context_builder.config.reserved_output_tokens > profile.max_output_tokens:
                 raise ValueError("ContextConfig output reserve exceeds the Model Profile limit.")
         adapters = repository_adapters(repository)
-        self._sessions = adapters.sessions
-        self._runs = adapters.runs
-        self._tool_ledger = adapters.tools
+        self._sessions = session_repository or adapters.sessions
+        self._runs = run_repository or adapters.runs
+        self._tool_ledger = tool_execution_repository or adapters.tools
         self._cache_store = PromptCacheStore()
         self._listeners: list[AgentEventListener] = []
         self._sequence = 0
@@ -385,34 +395,6 @@ class AgentCore:
                     disabled_listeners,
                     event_sink,
                 )
-
-
-def _tool_data(tool_call: ToolCall) -> dict[str, object]:
-    return {"tool_call_id": tool_call.id, "name": tool_call.name, "arguments": tool_call.arguments}
-
-
-def _tool_result_data(result: ToolResult) -> dict[str, object]:
-    return {
-        "tool_call_id": result.tool_call_id,
-        "name": result.tool_name,
-        "result": result.to_json(),
-        "success": result.ok,
-        "retryable": result.retryable,
-    }
-
-
-def _control_stop(control: RunControl) -> StopReason | None:
-    return control.stop_reason
-
-
-def _fingerprint(tool_call: ToolCall) -> str:
-    try:
-        arguments = json.dumps(
-            json.loads(tool_call.arguments), sort_keys=True, separators=(",", ":")
-        )
-    except (TypeError, json.JSONDecodeError):
-        arguments = tool_call.arguments.strip()
-    return f"{tool_call.name}\0{arguments}"
 
 
 def _model_response(

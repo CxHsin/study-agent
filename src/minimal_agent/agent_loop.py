@@ -7,7 +7,7 @@ from collections.abc import Callable
 from minimal_agent.context import ContextBuilder, ContextError
 from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
 from minimal_agent.events import AgentEvent, EventKind
-from minimal_agent.persistence import ToolLedgerRepository
+from minimal_agent.persistence import ToolExecutionRepository
 from minimal_agent.protocol import (
     AssistantMessage,
     ModelAdapter,
@@ -43,7 +43,7 @@ class AgentLoop:
         session: AgentSession,
         context_builder: ContextBuilder,
         max_steps: int,
-        tool_ledger: ToolLedgerRepository | None,
+        tool_ledger: ToolExecutionRepository | None,
         cache_store: PromptCacheStore,
         apply_steering: Callable[[str, int, Emit], None],
         close_steering: Callable[[], None],

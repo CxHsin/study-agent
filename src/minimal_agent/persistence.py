@@ -54,7 +54,7 @@ class RunRepository(Protocol):
     ) -> tuple[str, str | None, tuple[ChatMessage, ...]] | None: ...
 
 
-class ToolLedgerRepository(Protocol):
+class ToolExecutionRepository(Protocol):
     def record_tool(
         self,
         run_id: str,
@@ -67,6 +67,18 @@ class ToolLedgerRepository(Protocol):
         idempotent: bool = False,
     ) -> None: ...
 
+    def record_tool_started(
+        self,
+        run_id: str,
+        call_id: str,
+        name: str,
+        arguments: str,
+        *,
+        idempotent: bool = False,
+    ) -> None: ...
+
+
+class ToolLedgerRepository(ToolExecutionRepository, Protocol):
     def record_tool_lifecycle(
         self,
         run_id: str,
@@ -74,16 +86,6 @@ class ToolLedgerRepository(Protocol):
         name: str,
         arguments: str,
         result: str,
-        *,
-        idempotent: bool = False,
-    ) -> None: ...
-
-    def record_tool_started(
-        self,
-        run_id: str,
-        call_id: str,
-        name: str,
-        arguments: str,
         *,
         idempotent: bool = False,
     ) -> None: ...
@@ -116,7 +118,7 @@ class Repository(SessionRepository, RunRepository, ToolLedgerRepository, Protoco
 class RepositoryAdapters:
     sessions: SessionRepository | None
     runs: RunRepository | None
-    tools: ToolLedgerRepository | None
+    tools: ToolExecutionRepository | None
 
 
 def repository_adapters(repository: Repository | None) -> RepositoryAdapters:
