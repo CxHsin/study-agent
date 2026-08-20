@@ -2,6 +2,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition
 
@@ -12,6 +13,7 @@ from minimal_agent.deepseek import DeepSeekAdapter
 from minimal_agent.events import AgentEvent, EventKind
 from minimal_agent.persistence import SQLiteRepository
 from minimal_agent.provider_client import ProviderClient
+from minimal_agent.recovery import RecoveryCoordinator, RecoveryPlan
 from minimal_agent.workspace_tools import WorkspaceTools
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +21,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ConsoleRuntime:
+    core: AgentCore
+    recovery: RecoveryCoordinator
+    recovery_plan: RecoveryPlan
 
 
 class ConsoleConfirmation:
@@ -151,6 +160,10 @@ def run_console(
 
 
 def create_core(confirmation: ConsoleConfirmation | None = None) -> AgentCore:
+    return create_runtime(confirmation).core
+
+
+def create_runtime(confirmation: ConsoleConfirmation | None = None) -> ConsoleRuntime:
     load_dotenv(PROJECT_ROOT / ".env")
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if api_key is None or not api_key.strip():
@@ -163,14 +176,16 @@ def create_core(confirmation: ConsoleConfirmation | None = None) -> AgentCore:
     storage = PROJECT_ROOT / ".minimal-agent"
     storage.mkdir(exist_ok=True)
     repository = SQLiteRepository(storage / "agent.sqlite")
-    repository.recover()
+    recovery = RecoveryCoordinator(repository)
+    recovery_plan = recovery.recover()
     saved = repository.latest_session()
     session = None
     if saved is not None:
         from minimal_agent.session import AgentSession
 
         session = AgentSession(saved[2], system_prompt=saved[1], session_id=saved[0])
-    return AgentCore(model=model, tools=tools, session=session, repository=repository)
+    core = AgentCore(model=model, tools=tools, session=session, repository=repository)
+    return ConsoleRuntime(core, recovery, recovery_plan)
 
 
 def _display_last_trace(events: list[AgentEvent], output_fn: Callable[[str], None]) -> None:
@@ -195,8 +210,10 @@ def _display_last_trace(events: list[AgentEvent], output_fn: Callable[[str], Non
 def main() -> int:
     confirmation = ConsoleConfirmation(coordinated=True)
     try:
-        core = create_core(confirmation)
+        runtime = create_runtime(confirmation)
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 1
-    return run_console(core, confirmation=confirmation)
+    for tool in runtime.recovery_plan.unresolved:
+        print(f"Recovery> {tool.run_id}/{tool.call_id} {tool.name} requires Tool Resolution.")
+    return run_console(runtime.core, confirmation=confirmation)

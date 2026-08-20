@@ -9,7 +9,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from minimal_agent.recovery import ContinuationRun
 
 from minimal_agent.protocol import (
     AssistantMessage,
@@ -374,12 +377,15 @@ class SQLiteRepository:
         return (*messages, ToolResultMessage(ToolResult(call_id, tool_name, ok, data=data)))
 
     def recover(self) -> tuple[UnresolvedTool, ...]:
-        unresolved = self.unresolved_tools()
+        from minimal_agent.recovery import RecoveryCoordinator
+
+        return RecoveryCoordinator(self).recover().unresolved
+
+    def mark_interrupted_runs(self) -> None:
         with self._connection:
             self._connection.execute(
                 "UPDATE runs SET status='needs_resolution' WHERE status='running'"
             )
-        return unresolved
 
     def start_run(self, run_id: str, session_id: str, parent_run_id: str | None = None) -> None:
         with self._connection:
@@ -504,37 +510,43 @@ class SQLiteRepository:
         return tuple(json.loads(row[0]) for row in rows)
 
     def create_continuation(self, parent_run_id: str, run_id: str, session_id: str) -> None:
-        self.start_run(run_id, session_id, parent_run_id=parent_run_id)
-        self.append_event(run_id, 1, "continuation_started", {"parent_run_id": parent_run_id})
+        with self._connection:
+            self._insert_continuation(parent_run_id, run_id, session_id)
 
     def retry_tool(
         self, run_id: str, call_id: str, continuation_run_id: str, session_id: str
     ) -> UnresolvedTool:
-        tool = next(
-            (
-                item
-                for item in self.unresolved_tools()
-                if item.run_id == run_id and item.call_id == call_id
-            ),
-            None,
+        from minimal_agent.recovery import ContinuationRun, RecoveryCoordinator
+
+        return RecoveryCoordinator(self).retry_tool(
+            run_id,
+            call_id,
+            ContinuationRun(continuation_run_id, session_id),
         )
-        if tool is None:
-            raise KeyError(f"Unknown unresolved Tool Execution: {run_id}/{call_id}")
-        if not tool.idempotent:
-            raise RuntimeError("Only idempotent Tool Executions may be retried automatically.")
-        self.create_continuation(run_id, continuation_run_id, session_id)
+
+    def schedule_tool_retry(
+        self,
+        tool: UnresolvedTool,
+        continuation: ContinuationRun,
+    ) -> None:
         with self._connection:
+            self._insert_continuation(
+                tool.run_id,
+                continuation.run_id,
+                continuation.session_id,
+            )
             self._connection.execute(
                 "UPDATE tool_executions SET status='retry_scheduled' WHERE run_id=? AND call_id=?",
-                (run_id, call_id),
+                (tool.run_id, tool.call_id),
             )
-        self.append_event(
-            continuation_run_id,
-            2,
-            "tool_retry_scheduled",
-            {"parent_run_id": run_id, "call_id": call_id},
-        )
-        return tool
+            self._connection.execute(
+                "INSERT INTO events(run_id, sequence, kind, data_json, format_version) VALUES (?, 2, 'tool_retry_scheduled', ?, ?)",
+                (
+                    continuation.run_id,
+                    _json({"parent_run_id": tool.run_id, "call_id": tool.call_id}, self.redactor),
+                    SCHEMA_VERSION,
+                ),
+            )
 
     def resolve_tool(
         self,
@@ -544,22 +556,71 @@ class SQLiteRepository:
         continuation_run_id: str | None = None,
         session_id: str | None = None,
     ) -> None:
-        if continuation_run_id is not None:
-            if session_id is None:
-                raise ValueError("session_id is required for a continuation Run.")
-            self.create_continuation(run_id, continuation_run_id, session_id)
+        from minimal_agent.recovery import ContinuationRun, RecoveryCoordinator
+
+        if (continuation_run_id is None) != (session_id is None):
+            raise ValueError("continuation_run_id and session_id must be provided together.")
+        RecoveryCoordinator(self).resolve_tool(
+            run_id,
+            call_id,
+            result,
+            ContinuationRun(continuation_run_id, session_id)
+            if continuation_run_id is not None and session_id is not None
+            else None,
+        )
+
+    def store_tool_resolution(
+        self,
+        tool: UnresolvedTool,
+        result: str,
+        continuation: ContinuationRun | None,
+    ) -> None:
         with self._connection:
+            if continuation is not None:
+                self._insert_continuation(
+                    tool.run_id,
+                    continuation.run_id,
+                    continuation.session_id,
+                )
             self._connection.execute(
                 "UPDATE tool_executions SET status='completed', result_json=? WHERE run_id=? AND call_id=?",
-                (_json(result, self.redactor), run_id, call_id),
+                (_json(result, self.redactor), tool.run_id, tool.call_id),
             )
-        if continuation_run_id is not None:
-            self.append_event(
-                continuation_run_id,
-                2,
-                "tool_resolved",
-                {"parent_run_id": run_id, "call_id": call_id, "result": result},
-            )
+            if continuation is not None:
+                self._connection.execute(
+                    "INSERT INTO events(run_id, sequence, kind, data_json, format_version) VALUES (?, 2, 'tool_resolved', ?, ?)",
+                    (
+                        continuation.run_id,
+                        _json(
+                            {
+                                "parent_run_id": tool.run_id,
+                                "call_id": tool.call_id,
+                                "result": result,
+                            },
+                            self.redactor,
+                        ),
+                        SCHEMA_VERSION,
+                    ),
+                )
+
+    def _insert_continuation(
+        self,
+        parent_run_id: str,
+        run_id: str,
+        session_id: str,
+    ) -> None:
+        self._connection.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, 'running', NULL, NULL, ?, NULL)",
+            (run_id, session_id, parent_run_id, datetime.now(UTC).isoformat()),
+        )
+        self._connection.execute(
+            "INSERT INTO events(run_id, sequence, kind, data_json, format_version) VALUES (?, 1, 'continuation_started', ?, ?)",
+            (
+                run_id,
+                _json({"parent_run_id": parent_run_id}, self.redactor),
+                SCHEMA_VERSION,
+            ),
+        )
 
     def close(self) -> None:
         self._connection.close()
