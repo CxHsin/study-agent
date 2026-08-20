@@ -112,6 +112,26 @@ class Repository(SessionRepository, RunRepository, ToolLedgerRepository, Protoco
     """
 
 
+@dataclass(frozen=True)
+class RepositoryAdapters:
+    sessions: SessionRepository | None
+    runs: RunRepository | None
+    tools: ToolLedgerRepository | None
+
+
+def repository_adapters(repository: Repository | None) -> RepositoryAdapters:
+    if repository is None:
+        return RepositoryAdapters(None, None, None)
+    return RepositoryAdapters(
+        getattr(repository, "sessions", None)
+        or (repository if callable(getattr(repository, "save_session", None)) else None),
+        getattr(repository, "runs", None)
+        or (repository if callable(getattr(repository, "start_run", None)) else None),
+        getattr(repository, "tools", None)
+        or (repository if callable(getattr(repository, "record_tool", None)) else None),
+    )
+
+
 class Redactor:
     _secret_key = re.compile(r"(?i)(api[_-]?key|authorization|cookie|token|secret|password)")
     _secret = re.compile(
@@ -191,6 +211,9 @@ class SQLiteRepository:
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._migrate()
+        self._sessions = SQLiteSessionRepository(self)
+        self._runs = SQLiteRunRepository(self)
+        self._tools = SQLiteToolLedgerRepository(self)
 
     def _migrate(self) -> None:
         with self._connection:
@@ -233,15 +256,15 @@ class SQLiteRepository:
 
     @property
     def sessions(self) -> SQLiteSessionRepository:
-        return SQLiteSessionRepository(self)
+        return self._sessions
 
     @property
     def runs(self) -> SQLiteRunRepository:
-        return SQLiteRunRepository(self)
+        return self._runs
 
     @property
     def tools(self) -> SQLiteToolLedgerRepository:
-        return SQLiteToolLedgerRepository(self)
+        return self._tools
 
     def save_session(self, session_id: str, system_prompt: str | None, messages: object) -> None:
         stored_messages = (

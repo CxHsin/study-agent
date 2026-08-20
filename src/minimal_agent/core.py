@@ -3,19 +3,16 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from types import MappingProxyType
 from uuid import uuid4
 
 from minimal_agent.agent_loop import AgentLoop
-from minimal_agent.context import ContextBuilder, ContextError, ModelSummarizer
-from minimal_agent.cost import PromptCacheStore, checkpoint_for, usage_record
+from minimal_agent.context import ContextBuilder, ModelSummarizer
+from minimal_agent.cost import PromptCacheStore
 from minimal_agent.events import AgentEvent, AgentEventListener, EventKind
-from minimal_agent.persistence import Repository
+from minimal_agent.persistence import Repository, repository_adapters
 from minimal_agent.protocol import (
-    AssistantMessage,
     ChatMessage,
     ModelAdapter,
     ModelProfile,
@@ -29,61 +26,12 @@ from minimal_agent.protocol import (
     TextDelta,
     ToolCall,
     ToolCallDelta,
-    ToolResultMessage,
     UserMessage,
 )
 from minimal_agent.provider_client import ProviderClient, aggregate_stream
+from minimal_agent.run import RunControl, RunError, RunResult, StopReason
 from minimal_agent.session import AgentSession
-from minimal_agent.tools import ToolError, ToolRegistry, ToolResult
-
-
-class StopReason(StrEnum):
-    FINAL = "final"
-    MAX_STEPS = "max_steps"
-    REPEATED_TOOL_CALL = "repeated_tool_call"
-    ABORTED = "aborted"
-    CANCELLED = "cancelled"
-    ERROR = "error"
-
-
-@dataclass(frozen=True)
-class RunError:
-    code: str
-    message: str
-    error_type: str
-    step: int
-    tool_call_id: str | None = None
-    retryable: bool = False
-    status_code: int | None = None
-    provider_request_id: str | None = None
-    retry_after: float | None = None
-
-
-@dataclass(frozen=True)
-class RunResult:
-    final_response: str | None
-    stop_reason: StopReason
-    steps_used: int
-    run_id: str
-    error: RunError | None = None
-    events: tuple[AgentEvent, ...] = ()
-    context_metadata: tuple[dict[str, object], ...] = ()
-
-
-class RunControl:
-    def __init__(self) -> None:
-        self._stop_reason: StopReason | None = None
-
-    def abort(self) -> None:
-        self._stop_reason = StopReason.ABORTED
-
-    def cancel(self) -> None:
-        if self._stop_reason is None:
-            self._stop_reason = StopReason.CANCELLED
-
-    @property
-    def stop_reason(self) -> StopReason | None:
-        return self._stop_reason
+from minimal_agent.tools import ToolRegistry, ToolResult
 
 
 class AgentCore:
@@ -109,8 +57,10 @@ class AgentCore:
                 raise ValueError("ContextConfig exceeds the Model Profile context window.")
             if self._context_builder.config.reserved_output_tokens > profile.max_output_tokens:
                 raise ValueError("ContextConfig output reserve exceeds the Model Profile limit.")
-        self._repository = repository
-        self._loop = AgentLoop(self._run_prompt)
+        adapters = repository_adapters(repository)
+        self._sessions = adapters.sessions
+        self._runs = adapters.runs
+        self._tool_ledger = adapters.tools
         self._cache_store = PromptCacheStore()
         self._listeners: list[AgentEventListener] = []
         self._sequence = 0
@@ -118,6 +68,22 @@ class AgentCore:
         self._active_control: RunControl | None = None
         self._steering_open = False
         self._steering: queue.Queue[str] = queue.Queue()
+        self._loop = AgentLoop(
+            model=self._model,
+            tools=self._tools,
+            session=self._session,
+            context_builder=self._context_builder,
+            max_steps=self._max_steps,
+            tool_ledger=self._tool_ledger,
+            cache_store=self._cache_store,
+            apply_steering=self._apply_steering,
+            close_steering=self._close_steering,
+            result=self._result,
+            error=self._error,
+            finish=self._finish,
+            model_response=_model_response,
+            provider_capabilities=_provider_capabilities,
+        )
 
     def subscribe(self, listener: AgentEventListener) -> None:
         self._listeners.append(listener)
@@ -137,9 +103,9 @@ class AgentCore:
         self, continuation_run_id: str, user_input: str, control: RunControl | None = None
     ) -> RunResult:
         """Resume a persisted continuation using the current Session boundary."""
-        if self._repository is None:
+        if self._runs is None:
             raise RuntimeError("A Repository is required to continue a persisted Run.")
-        lookup = getattr(self._repository, "continuation_session", None)
+        lookup = getattr(self._runs, "continuation_session", None)
         continuation = lookup(continuation_run_id) if callable(lookup) else None
         if continuation is None:
             raise KeyError(f"Unknown continuation Run: {continuation_run_id}")
@@ -150,6 +116,7 @@ class AgentCore:
                 system_prompt=system_prompt,
                 session_id=session_id,
             )
+            self._loop.use_session(self._session)
         else:
             self._session.restore(messages, system_prompt=system_prompt)
         return self.prompt(user_input, control)
@@ -230,19 +197,14 @@ class AgentCore:
                 )
             return result
         try:
-            return self._loop.run(run_id, user_input, control, event_sink)
+            return self._run_prompt(run_id, user_input, control, event_sink)
         finally:
             with self._active_lock:
                 self._active_control = None
                 self._steering_open = False
             self._apply_pending_steering_to_session()
             try:
-                self._repository_call(
-                    "save_session",
-                    self._session.session_id,
-                    self._session.system_prompt,
-                    self._session.messages,
-                )
+                self._save_session()
             finally:
                 self._session.release_run()
 
@@ -256,19 +218,14 @@ class AgentCore:
         with self._active_lock:
             self._active_control = control
             self._steering_open = True
-        self._repository_call("start_run", run_id, self._session.session_id)
+        if self._runs is not None:
+            self._runs.start_run(run_id, self._session.session_id)
         self._sequence = 0
         trace: list[AgentEvent] = []
         started_at = time.perf_counter()
         disabled_listeners: set[int] = set()
-        context_metadata: list[dict[str, object]] = []
         self._session.append(UserMessage(user_input))
-        self._repository_call(
-            "save_session",
-            self._session.session_id,
-            self._session.system_prompt,
-            self._session.messages,
-        )
+        self._save_session()
         emit = lambda kind, data: self._emit(
             run_id, kind, data, trace, started_at, disabled_listeners, event_sink
         )
@@ -280,226 +237,7 @@ class AgentCore:
                 "message_count": len(self._session.messages),
             },
         )
-        last_fingerprint: str | None = None
-        pending_repeat: str | None = None
-        seen_tool_call_ids = {
-            call.id
-            for message in self._session.messages
-            if isinstance(message, AssistantMessage)
-            for call in message.tool_calls
-        }
-        try:
-            for step in range(1, self._max_steps + 1):
-                stop = _control_stop(control)
-                if stop:
-                    return self._result(run_id, stop, step - 1, trace, emit, context_metadata)
-                self._apply_steering(run_id, step, emit)
-                emit(
-                    EventKind.MODEL_CALL_STARTED,
-                    {"step": step, "message_count": len(self._session.messages)},
-                )
-                model_started = time.perf_counter()
-                try:
-                    context = self._context_builder.build(
-                        self._session.messages, system_prompt=self._session.system_prompt
-                    )
-                    metadata = {
-                        "step": step,
-                        "estimated_tokens_before": context.estimated_tokens_before,
-                        "estimated_tokens": context.estimated_tokens,
-                        "input_budget": context.input_budget,
-                        "compressed": context.compressed,
-                        "summary_count": len(context.summaries),
-                        "summary_cache_hits": context.cache_hits,
-                        "compression_elapsed_ms": context.elapsed_ms,
-                        "estimator": self._context_builder.estimator.name,
-                    }
-                    context_metadata.append(metadata)
-                    response = _model_response(
-                        self._model,
-                        context.messages,
-                        self._tools.definitions(),
-                        self._context_builder.config.reserved_output_tokens,
-                        emit,
-                        step,
-                    )
-                    capabilities = _provider_capabilities(self._model)
-                    checkpoint = checkpoint_for(
-                        context.messages,
-                        session_id=self._session.session_id,
-                        message_index=len(context.messages),
-                        model=getattr(self._model, "model_name", type(self._model).__name__),
-                        tool_schema=self._tools.definitions(),
-                        system_prompt=self._session.system_prompt,
-                        context_builder=self._context_builder.estimator.name,
-                    )
-                    local_cache_hit = self._cache_store.lookup(checkpoint)
-                    self._cache_store.record(checkpoint)
-                    usage = usage_record(
-                        response,
-                        estimated_input=context.estimated_tokens,
-                        latency_ms=(time.perf_counter() - model_started) * 1000,
-                        capabilities=capabilities,
-                        # The checkpoint is observable bookkeeping; no local model computation is reused.
-                        local_cache_hit=local_cache_hit,
-                    )
-                except ContextError as error:
-                    return self._error(
-                        run_id,
-                        error.code,
-                        str(error),
-                        "context_error",
-                        step,
-                        trace=trace,
-                        emit=emit,
-                        context_metadata=context_metadata,
-                    )
-                except ProviderError as error:
-                    return self._error(
-                        run_id,
-                        error.kind.value.upper(),
-                        str(error) or "Model request failed.",
-                        "provider_error",
-                        step,
-                        provider_error=error,
-                        trace=trace,
-                        emit=emit,
-                        context_metadata=context_metadata,
-                    )
-                emit(
-                    EventKind.MODEL_RESPONSE,
-                    {
-                        "step": step,
-                        "content": response.content,
-                        "tool_calls": tuple(_tool_data(call) for call in response.tool_calls),
-                        "usage": response.usage,
-                        "provider_cache_hit": response.provider_cache_hit,
-                        "usage_record": usage,
-                        "prompt_cache_checkpoint": checkpoint,
-                    },
-                )
-                stop = _control_stop(control)
-                if stop:
-                    return self._result(run_id, stop, step, trace, emit, context_metadata)
-                if not response.tool_calls:
-                    if not response.content:
-                        return self._error(
-                            run_id,
-                            "INVALID_MODEL_RESPONSE",
-                            "Model returned no final content.",
-                            "model_error",
-                            step,
-                            trace=trace,
-                            emit=emit,
-                            context_metadata=context_metadata,
-                        )
-                    self._session.append(AssistantMessage(response.content))
-                    self._close_steering()
-                    emit(EventKind.FINAL_RESPONSE, {"step": step, "content": response.content})
-                    return self._finish(
-                        RunResult(
-                            response.content,
-                            StopReason.FINAL,
-                            step,
-                            run_id,
-                            context_metadata=tuple(context_metadata),
-                        ),
-                        trace,
-                    )
-
-                fingerprints = [_fingerprint(call) for call in response.tool_calls]
-                if any(call.id in seen_tool_call_ids for call in response.tool_calls):
-                    return self._error(
-                        run_id,
-                        "REPEATED_TOOL_CALL",
-                        "Model repeated a Tool Call.",
-                        "control_error",
-                        step,
-                        StopReason.REPEATED_TOOL_CALL,
-                        trace=trace,
-                        emit=emit,
-                        context_metadata=context_metadata,
-                    )
-                if pending_repeat is not None and pending_repeat in fingerprints:
-                    return self._error(
-                        run_id,
-                        "REPEATED_TOOL_CALL",
-                        "Model repeated a blocked tool call.",
-                        "control_error",
-                        step,
-                        StopReason.REPEATED_TOOL_CALL,
-                        trace=trace,
-                        emit=emit,
-                        context_metadata=context_metadata,
-                    )
-                self._session.append(AssistantMessage(response.content, response.tool_calls))
-                seen_tool_call_ids.update(call.id for call in response.tool_calls)
-                for tool_call in response.tool_calls:
-                    stop = _control_stop(control)
-                    if stop:
-                        return self._result(run_id, stop, step, trace, emit, context_metadata)
-                    fingerprint = _fingerprint(tool_call)
-                    if fingerprint == last_fingerprint:
-                        result = ToolResult(
-                            tool_call.id,
-                            tool_call.name,
-                            False,
-                            error=ToolError("REPEATED_TOOL_CALL", "Repeated tool call blocked."),
-                        )
-                        self._session.append(ToolResultMessage(result))
-                        emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(result))
-                        pending_repeat = fingerprint
-                        last_fingerprint = fingerprint
-                        continue
-                    pending_repeat = None
-                    last_fingerprint = fingerprint
-                    definition = self._tools.get(tool_call.name)
-                    emit(EventKind.TOOL_CALL_REQUESTED, _tool_data(tool_call))
-                    self._repository_call(
-                        "record_tool_started",
-                        run_id,
-                        tool_call.id,
-                        tool_call.name,
-                        tool_call.arguments,
-                        idempotent=definition.idempotent if definition else False,
-                    )
-                    result = self._tools.execute(
-                        tool_call, run_id=run_id, user_input=user_input, control=control
-                    )
-                    self._repository_call(
-                        "record_tool",
-                        run_id,
-                        tool_call.id,
-                        tool_call.name,
-                        tool_call.arguments,
-                        "completed",
-                        result.to_json(),
-                        idempotent=definition.idempotent if definition else False,
-                    )
-                    self._session.append(ToolResultMessage(result))
-                    emit(EventKind.TOOL_RESULT_PRODUCED, _tool_result_data(result))
-                    stop = _control_stop(control)
-                    if stop:
-                        return self._result(run_id, stop, step, trace, emit, context_metadata)
-            return self._result(
-                run_id,
-                StopReason.MAX_STEPS,
-                self._max_steps,
-                trace,
-                emit,
-                context_metadata,
-            )
-        except Exception as error:  # noqa: BLE001 - run boundary returns structured errors
-            return self._error(
-                run_id,
-                "INTERNAL_ERROR",
-                str(error) or "Internal error.",
-                "internal_error",
-                locals().get("step", 0),
-                trace=trace,
-                emit=emit,
-                context_metadata=context_metadata,
-            )
+        return self._loop.run(run_id, user_input, control, emit, trace)
 
     def _discard_pending_steering(self) -> None:
         while True:
@@ -516,12 +254,13 @@ class AgentCore:
                 return
             self._session.append(UserMessage(message))
 
-    def _repository_call(self, method: str, *args, **kwargs) -> None:
-        if self._repository is None:
-            return
-        callback = getattr(self._repository, method, None)
-        if callback is not None:
-            callback(*args, **kwargs)
+    def _save_session(self) -> None:
+        if self._sessions is not None:
+            self._sessions.save_session(
+                self._session.session_id,
+                self._session.system_prompt,
+                self._session.messages,
+            )
 
     def _apply_steering(self, run_id: str, step: int, emit) -> None:
         while True:
@@ -537,15 +276,9 @@ class AgentCore:
 
     def _finish(self, result: RunResult, trace: list[AgentEvent]) -> RunResult:
         self._close_steering()
-        self._repository_call(
-            "save_session",
-            self._session.session_id,
-            self._session.system_prompt,
-            self._session.messages,
-        )
-        self._repository_call(
-            "finish_run", result.run_id, result.stop_reason.value, result.steps_used
-        )
+        self._save_session()
+        if self._runs is not None:
+            self._runs.finish_run(result.run_id, result.stop_reason.value, result.steps_used)
         return RunResult(
             result.final_response,
             result.stop_reason,
@@ -632,7 +365,8 @@ class AgentCore:
             (time.perf_counter() - started_at) * 1000,
         )
         trace.append(event)
-        self._repository_call("append_event", run_id, event.sequence, event.kind.value, event.data)
+        if self._runs is not None:
+            self._runs.append_event(run_id, event.sequence, event.kind.value, event.data)
         if event_sink is not None:
             event_sink(event)
         for index, listener in enumerate(self._listeners):
